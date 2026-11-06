@@ -582,6 +582,105 @@ void web_smoke(httplib::Server& server, WebApplication& application, int port, c
         require(clean({{"mode", "all"}}).at("removed") == 1 && cleaning.model.snapshot().catalog.files.empty(), "Clear all removes every entry");
     }
     {
+        WebApplication hidden(application.root / "clean-hidden-tests");
+        Scan fixture;
+        fixture.items = {"hidden-types"};
+        fixture.files = {File{"hidden-types", "Cover.jpg", 3, "", "", false}, File{"hidden-types", "Game.chd", 3, "", "", false}};
+        save_catalog(fixture, hidden.root / "fixture.xml");
+        hidden.model.import_catalog(hidden.root / "fixture.xml"); hidden.model.wait();
+        const auto state = hidden.model.snapshot();
+        std::size_t game = 0;
+        for (std::size_t index = 0; index < state.catalog.files.size(); ++index) if (state.catalog.files[index].name == "Game.chd") game = index;
+        require(state.catalog.files.size() == 2 && game == 1 && hidden.library().at("files").size() == 1, "The fixture hides a file type before the selected file");
+        const auto chosen = hidden.command({{"action", "cleanLibrary"}, {"preview", true}, {"indices", {game}}, {"revision", state.catalog_revision}});
+        require(chosen.at("total") == 1 && chosen.at("all") == 1, "Clean library finds a selected file listed after a hidden file type");
+        require(hidden.command({{"action", "cleanLibrary"}, {"mode", "all"}}).at("removed") == 2 && hidden.model.snapshot().catalog.files.empty(),
+            "Clean library covers hidden file types too");
+    }
+    {
+        WebApplication extracting(application.root / "extracted-tests");
+        extracting.extract = [](const std::filesystem::path&, const std::filesystem::path&, const std::function<bool()>&,
+            const std::function<void(const std::string&)>&, const std::function<void(std::uint64_t, std::uint64_t)>&) { return ExtractOutcome{}; };
+        const auto downloads = std::filesystem::absolute(extracting.root / "downloads").lexically_normal();
+        extracting.command({{"action", "settings"}, {"destination", downloads.u8string()}, {"output", (extracting.root / "exports").u8string()},
+            {"automatic", false}, {"locationPreference", "auto"}});
+        Scan fixture;
+        fixture.items = {"extract-types"};
+        fixture.files = {File{"extract-types", "Game.zip", 3, "", "", false}};
+        save_catalog(fixture, extracting.root / "fixture.xml");
+        extracting.model.import_catalog(extracting.root / "fixture.xml"); extracting.model.wait();
+        const auto game = extracting.model.snapshot().catalog.files.at(0);
+        const auto archive = downloads / "Game.zip", unpacked = downloads / "Game";
+        const auto unpack = [&] { std::filesystem::create_directories(unpacked / "Sub"); std::ofstream(unpacked / "Sub" / "data.bin", std::ios::binary) << "x"; };
+        const auto entry = [&] { return extracting.library().at("files").at(0); };
+        const auto revision = [&] { return extracting.model.snapshot().catalog_revision; };
+        const auto remove = [&] { extracting.command({{"action", "deleteDownload"}, {"revision", revision()}, {"index", 0}, {"path", archive.u8string()}}); };
+        require(extracting.config.download_dir == downloads && !entry().at("downloaded"), "The extraction tests use their own download folder");
+        unpack();
+        require(entry().at("downloaded") && entry().at("downloadState") == "Extracted" && entry().at("downloadCopies").at(0).at("extracted") == unpacked.u8string(),
+            "An extracted folder counts as downloaded without its archive or a record");
+        const auto again = extracting.command({{"action", "enqueue"}, {"revision", revision()}, {"indices", {0}}});
+        require(again.contains("confirmOverwrite") && again.at("confirmOverwrite").at(0) == unpacked.u8string() && extracting.model.snapshot().queue.empty(),
+            "Downloading again warns about the extracted folder");
+        remove();
+        require(!std::filesystem::exists(unpacked) && !entry().at("downloaded"), "Deleting an extracted download removes its folder");
+        unpack();
+        std::ofstream(archive, std::ios::binary) << "abc";
+        extracting.record_download(game, downloads);
+        require(entry().at("downloadState") == "Downloaded" && entry().at("downloadCopies").at(0).at("extracted") == unpacked.u8string(), "A recorded archive reports its extracted folder");
+        remove();
+        require(!std::filesystem::exists(archive) && !std::filesystem::exists(unpacked) && entry().at("downloadCopies").empty() && std::filesystem::exists(downloads),
+            "Deleting a download removes the archive and its extracted folder, and nothing else");
+        // A game removed from the library loses its record; after a new scan it is found again in its own location.
+        extracting.command({{"action", "addLocation"}, {"name", "N64"}, {"path", (extracting.root / "N64").u8string()}, {"tags", {"N64"}}});
+        const auto elsewhere = extracting.root / "N64" / "Game";
+        std::filesystem::create_directories(elsewhere);
+        const auto found = entry();
+        require(found.at("downloadState") == "Extracted" && std::filesystem::equivalent(std::filesystem::u8path(found.at("downloadCopies").at(0).at("extracted").get<std::string>()), elsewhere),
+            "An extracted folder in another download location counts as downloaded without a record");
+        extracting.command({{"action", "deleteDownload"}, {"revision", revision()}, {"index", 0}, {"path", found.at("downloadPath")}});
+        require(!std::filesystem::exists(elsewhere) && std::filesystem::exists(extracting.root / "N64") && !entry().at("downloaded"),
+            "Deleting removes an unrecorded extracted folder in another location");
+        require([&] { try { extracting.command({{"action", "deleteDownload"}, {"revision", revision()}, {"index", 0}, {"path", (extracting.root / "Game.zip").u8string()}}); return false; }
+            catch (const std::exception&) { return true; } }(), "Delete refuses a path outside the download locations");
+        unpack();
+        std::ofstream(archive, std::ios::binary) << "abc";
+        extracting.record_download(game, downloads);
+        const auto clean = [&](Json value) { value["action"] = "cleanLibrary"; value["indices"] = {0}; value["revision"] = revision(); return extracting.command(value); };
+        const auto planned = clean({{"preview", true}});
+        require(planned.at("deleteDownloads") == 1 && planned.at("delete").at("files") == 1 && planned.at("delete").at("bytes") == 4,
+            "Clean library offers to delete the selected download and counts its extracted folder's size");
+        require([&] { try { clean({{"mode", "deleteDownloads"}}); return false; } catch (const std::exception&) { return true; } }(), "Deleting downloads needs the typed confirmation");
+        const auto emptied = clean({{"mode", "deleteDownloads"}, {"confirm", "DELETE"}});
+        require(emptied.at("deleted") == 1 && emptied.at("bytes") == 4 && emptied.at("removed") == 0 && !std::filesystem::exists(archive) && !std::filesystem::exists(unpacked) &&
+            extracting.model.snapshot().catalog.files.size() == 1 && !entry().at("downloaded") && entry().at("downloadCopies").empty(),
+            "Delete downloads removes the archive and extracted folder but keeps the Library entry");
+    }
+    {
+        WebApplication combined(application.root / "clean-combined-tests");
+        const auto downloads = std::filesystem::absolute(combined.root / "downloads").lexically_normal();
+        combined.command({{"action", "settings"}, {"destination", downloads.u8string()}, {"output", (combined.root / "exports").u8string()},
+            {"automatic", false}, {"locationPreference", "auto"}});
+        Scan fixture;
+        fixture.items = {"combined"};
+        fixture.files = {File{"combined", "Kept.chd", 3, "", "", false}, File{"combined", "Never.chd", 3, "", "", false}};
+        save_catalog(fixture, combined.root / "fixture.xml");
+        combined.model.import_catalog(combined.root / "fixture.xml"); combined.model.wait();
+        for (const auto& file : combined.model.snapshot().catalog.files) if (file.name == "Kept.chd") {
+            std::filesystem::create_directories(downloads); std::ofstream(downloads / "Kept.chd", std::ios::binary) << "abc"; combined.record_download(file, downloads);
+        }
+        const auto clean = [&](Json value) { value["action"] = "cleanLibrary"; return combined.command(value); };
+        const auto planned = clean({{"preview", true}});
+        require(planned.at("delete").at("paths").size() == 1 && planned.at("delete").at("paths").at(0) == (downloads / "Kept.chd").u8string() && planned.at("undownloaded") == 1,
+            "The clean preview lists the downloads it would delete");
+        require([&] { try { clean({{"mode", "undownloaded"}, {"deleteDownloads", true}}); return false; } catch (const std::exception&) { return true; } }(),
+            "Deleting downloads needs the page's second confirmation");
+        const auto both = clean({{"mode", "undownloaded"}, {"deleteDownloads", true}, {"confirm", "DELETE"}});
+        const auto left = combined.model.snapshot().catalog.files;
+        require(both.at("deleted") == 1 && both.at("removed") == 1 && left.size() == 1 && left[0].name == "Kept.chd" && !std::filesystem::exists(downloads / "Kept.chd"),
+            "Deleting downloads and removing never-downloaded entries together keeps the entries whose downloads were just deleted");
+    }
+    {
         WebApplication locations(application.root / "location-tests");
         locations.model.restore_sources(application.model.snapshot().sources);
         save_catalog(application.model.snapshot().catalog, locations.root / "fixture.xml");

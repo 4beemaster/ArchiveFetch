@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "extract_engine.hpp"
+#include "remove_tree.hpp"
 
 namespace fs = std::filesystem;
 using namespace archivefetch_extract;
@@ -110,6 +111,23 @@ int main() {
         require(safe_entry_path("bad:name?.txt") == "bad_name_.txt" && safe_entry_path("dots./x") == "dots_/x" &&
             safe_entry_path(std::string("ctl\x01.txt")) == "ctl_.txt", "unsafe characters become _");
         require(safe_entry_path(std::string(256, 'x')).empty(), "over-long names are refused");
+        {
+            const auto tree = root / "Tree", outside = root / "outside.txt";
+            fs::create_directories(tree / "a" / "b" / "c");
+            fs::create_directories(tree / "empty");
+            std::ofstream(tree / "a" / "b" / "c" / "deep.bin") << "x";
+            std::ofstream(tree / "top.txt") << "x";
+            std::ofstream(outside) << "keep";
+            fs::create_symlink(outside, tree / "a" / "link.txt");
+            fs::create_directory_symlink(root, tree / "a" / "loop");
+            std::error_code failure;
+            require(archive_catalog::tree_size(tree) == 2, "tree_size counts only real files: " + std::to_string(archive_catalog::tree_size(tree)));
+            std::uintmax_t freed = 0;
+            require(archive_catalog::remove_tree(tree, failure, &freed) && !failure && !fs::exists(fs::symlink_status(tree)) && freed == 2, "remove_tree deletes a nested folder and counts its bytes");
+            require(read(outside) == "keep" && fs::exists(root), "remove_tree removes links without following them");
+            require(archive_catalog::remove_tree(tree, failure) && !failure, "remove_tree accepts a folder that is already gone");
+            fs::remove(outside);
+        }
 
         const auto big = pattern(3 * 1024 * 1024 + 17);
         const std::vector<Entry> normal = {{"Game/", "", AE_IFDIR}, {"Game/readme.txt", "hello"}, {"Game/data/big.bin", big},

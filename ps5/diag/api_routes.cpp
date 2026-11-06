@@ -850,7 +850,8 @@ void api_register_routes(httplib::Server& http) {
                     field("remove_entry", body.value("removeEntry", false) ? "true" : "false")});
             else if (action == "cleanLibrary" && !body.value("preview", false))
                 log_event("LIBRARY_CLEANED", {field("mode", body.value("mode", "").c_str()), field("scope", body.contains("indices") ? "selected" : "all"),
-                    field("removed", static_cast<long long>(result.value("removed", 0))), field("deleted", static_cast<long long>(result.value("deleted", 0)))});
+                    field("removed", static_cast<long long>(result.value("removed", 0))), field("deleted", static_cast<long long>(result.value("deleted", 0))),
+                    field("failed", static_cast<long long>(result.value("failed", 0))), field("problem", result.value("problem", "").c_str())});
             else if (action == "cleanDownloads")
                 log_event("DOWNLOADS_CLEANED", {field("removed", std::to_string(result.at("removed").get<std::size_t>()).c_str())});
             set_json(response, result.dump());

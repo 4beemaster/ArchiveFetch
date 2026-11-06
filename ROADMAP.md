@@ -9,6 +9,7 @@ Working plan; versions and details can still change.
 - **0.5.0**: queueing while a download runs, an Extension column and filter, configurable hidden file types (the catalog keeps every type), click-to-sort column headers.
 - **0.6.0**: cleanup with no new features: one version number for the Windows, Android and PS5 apps, the old SDL desktop app retired, the large shared files split; fixes for Android Settings saving and for clean Windows builds.
 - **0.7.0**: the Windows and Android apps connect to consoles: saved consoles with status dots and a target switcher, remote control through the app's backend, password sign-in and permanent pairing, a home-network scan, Install / Update of the console's ArchiveFetch from the app, and an add-only Merge in either direction; also comma-separated hidden file types and a hide button with Undo.
+- **0.7.1**: fixes: Clean library with hidden file types, deleting extracted folders on the PS5 (with the real space freed), extracted downloads recognized in every download location, a simpler Clean library popup (delete downloads and/or remove entries, with a second confirmation), and no local build paths in the Android app.
 
 ## 1.0.0
 

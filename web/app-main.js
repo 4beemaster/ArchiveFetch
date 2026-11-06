@@ -87,6 +87,7 @@ $('import').addEventListener('click', async () => { const result = await run('ch
 $('export').addEventListener('click', () => run('export'));
 $('clean-library').addEventListener('click', openClean);
 document.querySelectorAll('[name="clean-scope"]').forEach(radio => radio.addEventListener('change', loadCleanPreview));
+['clean-delete', 'clean-remove', 'clean-which'].forEach(id => $(id).addEventListener('change', updateCleanChoice));
 $('clean-form').addEventListener('submit', submitClean);
 $('share-downloads').addEventListener('click', () => run('share', { indices: [...state.selected], revision: state.snapshot.catalogRevision }));
 $('settings-button').addEventListener('click', () => {

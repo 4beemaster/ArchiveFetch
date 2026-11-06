@@ -284,11 +284,10 @@ async function deleteDownload(file) {
   // Offered only when this is the file's last copy and its source is gone, so the entry would linger.
   const option = file.sourceRemoved && (file.downloadCopies?.length || 0) <= 1 ? 'Also remove it from the Library (its source was removed)' : '';
   const extractedTo = file.downloadCopies?.find(copy => copy.path === file.downloadPath)?.extracted;
-  const folderNote = extractedTo ? ' The extracted folder stays.' : '';
   const confirmed = file.downloadState === 'Extracted'
-    ? await confirmAction('Remove download record?', `The archive was deleted after extracting. Only the record is removed.${folderNote}`, [file.downloadPath, extractedTo], option, true)
+    ? await confirmAction('Delete extracted folder?', 'The archive was deleted after extracting. Its extracted folder is removed from storage. It stays in the library and can be downloaded again.', [extractedTo], option, true)
     : file.downloaded
-    ? await confirmAction('Delete downloaded file?', `The file is removed from storage. It stays in the library and can be downloaded again.${folderNote}`, [file.downloadPath], option, true)
+    ? await confirmAction('Delete downloaded file?', `The file${extractedTo ? ' and its extracted folder are' : ' is'} removed from storage. It stays in the library and can be downloaded again.`, [file.downloadPath, extractedTo].filter(Boolean), option, true)
     : await confirmAction('Remove download record?', file.downloadState === 'Missing'
       ? 'The file is no longer in this folder. Only the record is removed.'
       : 'This location is not available (for example, an unplugged drive). Only the record is removed; nothing on the drive is changed.', [file.downloadPath], option, true);
@@ -297,19 +296,26 @@ async function deleteDownload(file) {
   try { await command('deleteDownload', { index: file.index, revision: state.snapshot.catalogRevision, path: file.downloadPath, removeEntry }); await loadLibrary(true); }
   catch (error) { fail(error.message); }
 }
-const cleanModes = [
-  ['orphans', 'Clear files without sources', 'Removes files whose source was deleted and that were never downloaded. Downloaded files stay, including ones on an unplugged drive.'],
-  ['undownloaded', 'Clear undownloaded files', 'Removes files that were never downloaded or whose download is missing. Files on an unplugged drive, changed, queued or partly downloaded files stay.'],
-  ['all', 'Clear all', 'Removes the entries only. Downloaded files stay on disk and show as downloaded again after a scan.'],
-  ['delete', 'Clear and delete everything', 'Deletes the downloaded files from storage, then removes the entries. Copies on an unplugged drive and changed files are left alone. Sources, collections and settings stay.']
+// The whole popup is two choices; the counts all come from one preview taken before anything changes.
+const cleanWhich = [
+  ['undownloaded', 'Only never downloaded'],
+  ['orphans', 'Only without a source'],
+  ['all', 'All of them']
 ];
 let cleanPreview = null;
 function cleanError(message) { $('clean-error').textContent = message; $('clean-error').hidden = false; }
 function cleanScope() { return $('clean-scope-selected').checked ? { indices: [...state.selected], revision: state.snapshot.catalogRevision } : {}; }
-function cleanMode() { return document.querySelector('[name="clean-mode"]:checked')?.value; }
+function plural(count, one, many = `${one}s`) { return `${count.toLocaleString()} ${count === 1 ? one : many}`; }
+function cleanChoice() {
+  const preview = cleanPreview, which = $('clean-which').value;
+  const deleting = $('clean-delete').checked && !$('clean-delete').disabled ? preview.delete.files : 0;
+  const removing = $('clean-remove').checked ? preview[which] || 0 : 0;
+  return { which, deleting, removing };
+}
 async function openClean() {
   const selected = state.selected.size;
-  $('clean-error').hidden = true; $('clean-confirm').value = '';
+  $('clean-error').hidden = true;
+  $('clean-delete').checked = false; $('clean-remove').checked = false;
   $('clean-scope-selected').disabled = !selected; $('clean-scope-selected').checked = !!selected; $('clean-scope-all').checked = !selected;
   $('clean-scope-selected-label').textContent = `Selected files (${selected.toLocaleString()})`;
   $('clean-scope-all-label').textContent = `Whole library (${state.files.length.toLocaleString()})`;
@@ -318,61 +324,73 @@ async function openClean() {
 }
 async function loadCleanPreview() {
   cleanPreview = null; $('clean-error').hidden = true; $('clean-submit').disabled = true;
-  $('clean-options').replaceChildren(node('p', 'Counting files...', 'setting-note')); $('clean-note').textContent = '';
-  $('clean-confirm-label').hidden = true; $('clean-kept').hidden = true;
-  try { cleanPreview = await request('/api/command', { action: 'cleanLibrary', preview: true, ...cleanScope() }); renderCleanOptions(); }
-  catch (error) { $('clean-options').replaceChildren(); cleanError(error.message); }
+  $('clean-delete').disabled = true; $('clean-remove').disabled = true; $('clean-which').disabled = true;
+  $('clean-delete-summary').textContent = 'Counting files...'; $('clean-note').textContent = ''; $('clean-kept').hidden = true;
+  try {
+    cleanPreview = await request('/api/command', { action: 'cleanLibrary', preview: true, ...cleanScope() });
+    // The whole-library count includes file types the Library hides.
+    const hidden = $('clean-scope-all').checked ? cleanPreview.total - state.files.length : 0;
+    if (hidden > 0) $('clean-scope-all-label').textContent = `Whole library (${state.files.length.toLocaleString()} + ${hidden.toLocaleString()} hidden)`;
+    renderCleanOptions();
+  }
+  catch (error) { $('clean-delete-summary').textContent = ''; cleanError(error.message); }
 }
 function renderCleanOptions() {
-  const preview = cleanPreview, total = preview.total.toLocaleString();
-  let first = null;
-  $('clean-options').replaceChildren(...cleanModes.map(([mode, title, description]) => {
-    const count = preview[mode === 'delete' ? 'all' : mode];
-    const unavailable = mode === 'delete' && (!preview.delete.supported || preview.downloading);
-    const choice = node('label', undefined, 'check clean-option'), radio = node('input');
-    radio.type = 'radio'; radio.name = 'clean-mode'; radio.value = mode; radio.disabled = !count || unavailable;
-    if (!radio.disabled && !first) first = radio;
-    const text = node('span');
-    const extra = mode === 'delete' && preview.delete.files ? `, deletes ${preview.delete.files.toLocaleString()} file${preview.delete.files === 1 ? '' : 's'} (${bytes(preview.delete.bytes)})` : '';
-    const why = mode === 'delete' && preview.downloading ? ' Wait for downloads to finish first.' : mode === 'delete' && !preview.delete.supported ? ' Not available on this device.' : '';
-    text.append(node('strong', title), node('span', `Removes ${count.toLocaleString()} of ${total}${extra}.${why}`, 'secondary'), node('span', description, 'secondary'));
-    radio.addEventListener('change', updateCleanChoice);
-    choice.append(radio, text); return choice;
-  }));
-  if (first) first.checked = true;
+  const preview = cleanPreview, chosen = $('clean-which').value || 'undownloaded';
+  $('clean-which').replaceChildren(...cleanWhich.map(([value, label]) => new Option(`${label} (${preview[value].toLocaleString()})`, value, false, value === chosen)));
+  const files = preview.delete.files, why = !preview.delete.supported ? ' Not available on this device.' : preview.downloading ? ' Wait for downloads to finish first.' : '';
+  $('clean-delete').disabled = !files || !!why;
+  if ($('clean-delete').disabled) $('clean-delete').checked = false;
+  const folders = preview.delete.folders ? `, including ${plural(preview.delete.folders, 'extracted folder')}` : '';
+  $('clean-delete-summary').textContent = files
+    ? `${plural(files, 'download')} (${bytes(preview.delete.bytes)}${folders}). The entries stay unless you also remove them.${why}`
+    : 'Nothing downloaded here.';
+  $('clean-remove').disabled = !preview.all;
   updateCleanChoice();
 }
 function updateCleanChoice() {
-  const mode = cleanMode(), preview = cleanPreview, deleting = mode === 'delete' && preview.delete.files > 0;
+  if (!cleanPreview) return;
+  const preview = cleanPreview, { which, deleting, removing } = cleanChoice();
+  $('clean-which').disabled = !$('clean-remove').checked;
   const notes = [];
-  if (preview.queued) notes.push(`${preview.queued.toLocaleString()} queued file${preview.queued === 1 ? ' is' : 's are'} kept.`);
-  if (mode === 'all' || mode === 'undownloaded') notes.push('Scanning a source again adds its files back.');
-  if (!mode) notes.push('Nothing to clean here.');
+  if (preview.queued) notes.push(`${plural(preview.queued, 'queued file')} ${preview.queued === 1 ? 'is' : 'are'} kept.`);
+  if (removing && which !== 'orphans') notes.push('Scanning a source again adds its files back.');
+  if ($('clean-remove').checked && which === 'all' && !$('clean-delete').checked && preview.delete.files) notes.push('Downloaded files stay on disk.');
   $('clean-note').textContent = notes.join(' ');
-  $('clean-confirm-label').hidden = !deleting;
-  $('clean-kept').hidden = !(mode === 'delete' && preview.delete.keptCount);
+  $('clean-kept').hidden = !(deleting && preview.delete.keptCount);
   $('clean-kept-title').textContent = `Left on disk (unplugged drive or changed file): ${preview.delete.keptCount.toLocaleString()}`;
   $('clean-kept-list').replaceChildren(...preview.delete.kept.map(path => node('li', path)));
-  $('clean-submit-label').textContent = deleting ? 'Delete and remove' : 'Remove';
-  $('clean-submit').disabled = !mode;
+  const parts = [];
+  if (deleting) parts.push(`Delete ${plural(deleting, 'download')}`);
+  if (removing) parts.push(`${deleting ? 'remove' : 'Remove'} ${plural(removing, 'entry', 'entries')}`);
+  $('clean-submit-label').textContent = parts.length ? parts.join(' and ') : 'Choose what to do';
+  $('clean-submit').disabled = !parts.length;
 }
 function fileKey(file) { return `${file.item}\n${file.name}`; }
 async function submitClean(event) {
   event.preventDefault();
-  const mode = cleanMode();
-  if (!mode) return;
-  if (mode === 'delete' && cleanPreview.delete.files && $('clean-confirm').value !== 'DELETE') { cleanError('Type DELETE to confirm.'); return; }
+  if (!cleanPreview) return;
+  const { which, deleting, removing } = cleanChoice();
+  if (!deleting && !removing) return;
+  if (deleting) {
+    const more = cleanPreview.delete.pathCount - cleanPreview.delete.paths.length;
+    const message = `These are removed from storage and cannot be recovered.${removing ? ` ${plural(removing, 'entry', 'entries')} ${removing === 1 ? 'is' : 'are'} also removed from the Library.` : ' The entries stay in the Library and can be downloaded again.'}${more > 0 ? ` (${more.toLocaleString()} more not shown.)` : ''}`;
+    if (!await confirmAction(`Delete ${plural(deleting, 'download')} (${bytes(cleanPreview.delete.bytes)})?`, message, cleanPreview.delete.paths)) return;
+  }
   const scope = cleanScope();
   const kept = scope.indices ? new Set(state.files.filter(file => state.selected.has(file.index)).map(fileKey)) : null;
   try {
-    const result = await command('cleanLibrary', { mode, confirm: $('clean-confirm').value, ...scope });
+    const result = await command('cleanLibrary', { mode: removing ? which : 'none', deleteDownloads: !!deleting, confirm: deleting ? 'DELETE' : '', ...scope });
     if (!result?.ok) return;
     $('clean-dialog').close();
     await loadLibrary(true);
     // Files that were selected and are still in the library stay selected.
     if (kept) { state.files.forEach(file => { if (kept.has(fileKey(file))) state.selected.add(file.index); }); renderLibrary(); }
-    const deleted = result.deleted ? `, deleted ${result.deleted.toLocaleString()} (${bytes(result.bytes)})` : '';
-    fail(`Removed ${result.removed.toLocaleString()} file${result.removed === 1 ? '' : 's'} from the Library${deleted}`, false);
+    const done = [];
+    if (result.deleted) done.push(`Deleted ${plural(result.deleted, 'download')} (${bytes(result.bytes)})`);
+    if (result.removed) done.push(`${done.length ? 'removed' : 'Removed'} ${plural(result.removed, 'entry', 'entries')} from the Library`);
+    if (result.failed) done.push(`${plural(result.failed, 'download')} could not be deleted: ${result.problem}`);
+    fail(done.join('; ') || 'Nothing changed', !!result.failed);
   } catch (error) { cleanError(error.message); }
 }
 function renderLocations() {

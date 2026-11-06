@@ -32,9 +32,9 @@ all: $(ELF)
 # decompression never runs inside ArchiveFetch. Single-threaded; ArchiveFetch carries it as embedded bytes.
 EXTRACT_DIR := $(ROOT)/ps5/extract
 EXTRACTOR := $(OUT)/ArchFtchX.elf
-$(EXTRACTOR): $(EXTRACT_DIR)/extract_main.cpp $(EXTRACT_DIR)/extract_engine.cpp $(PS5_HEADERS) $(ROOT)/ps5/diag/diag_log.cpp $(JSON_DIR)/include/nlohmann/json.hpp $(ROOT)/VERSION Makefile
+$(EXTRACTOR): $(EXTRACT_DIR)/extract_main.cpp $(EXTRACT_DIR)/extract_engine.cpp $(PS5_HEADERS) $(ROOT)/ps5/diag/diag_log.cpp $(ROOT)/src/remove_tree.hpp $(JSON_DIR)/include/nlohmann/json.hpp $(ROOT)/VERSION Makefile
 	mkdir -p $(OUT)
-	$(CXX) -DPS5_PAYLOAD=1 -I$(ROOT)/ps5/diag -I$(EXTRACT_DIR) -I$(JSON_DIR)/include $(shell $(PKG_CONFIG) --cflags --static libarchive) $(CXXFLAGS) -o $@ $(EXTRACT_DIR)/extract_main.cpp $(EXTRACT_DIR)/extract_engine.cpp $(ROOT)/ps5/diag/diag_log.cpp $(LDFLAGS) $(shell $(PKG_CONFIG) --libs --static libarchive)
+	$(CXX) -DPS5_PAYLOAD=1 -I$(ROOT)/ps5/diag -I$(EXTRACT_DIR) -I$(ROOT)/src -I$(JSON_DIR)/include $(shell $(PKG_CONFIG) --cflags --static libarchive) $(CXXFLAGS) -o $@ $(EXTRACT_DIR)/extract_main.cpp $(EXTRACT_DIR)/extract_engine.cpp $(ROOT)/ps5/diag/diag_log.cpp $(LDFLAGS) $(shell $(PKG_CONFIG) --libs --static libarchive)
 $(GEN)/extractor_elf.hpp: $(EXTRACTOR)
 	mkdir -p $(GEN)
 	{ echo 'const unsigned char extractor_elf[] = {'; xxd -i < $<; echo '};'; } > $@

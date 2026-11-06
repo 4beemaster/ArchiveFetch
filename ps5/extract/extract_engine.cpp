@@ -1,4 +1,5 @@
 #include "extract_engine.hpp"
+#include "remove_tree.hpp"
 
 #include <archive.h>
 #include <archive_entry.h>
@@ -203,7 +204,7 @@ Result extract_archive(const Options& options, Progress& progress, std::string& 
     archive_read_free(reader);
     if (result != Result::Done) {
         std::error_code ignored;
-        std::filesystem::remove_all(options.destination, ignored);
+        archive_catalog::remove_tree(options.destination, ignored);
     }
     return result;
 }

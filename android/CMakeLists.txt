@@ -6,6 +6,11 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_OBJECT_PATH_MAX 200)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+# Released libraries must not carry this computer's folder names (they leak through __FILE__ in error messages).
+get_filename_component(ARCHIVE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+set(ARCHIVE_PATH_MAP "-ffile-prefix-map=${ARCHIVE_ROOT}=/archivefetch -ffile-prefix-map=${ANDROID_NDK}=/ndk")
+string(APPEND CMAKE_C_FLAGS " ${ARCHIVE_PATH_MAP}")
+string(APPEND CMAKE_CXX_FLAGS " ${ARCHIVE_PATH_MAP}")
 include(FetchContent)
 FetchContent_Declare(boringssl
     URL https://github.com/google/boringssl/archive/refs/tags/0.20261020.0.tar.gz
@@ -18,6 +23,7 @@ execute_process(COMMAND "${CMAKE_COMMAND}" -S "${boringssl_SOURCE_DIR}" -B "${bo
     "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}" "-DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
     "-DANDROID_ABI=${ANDROID_ABI}" "-DANDROID_PLATFORM=${ANDROID_PLATFORM}" "-DANDROID_STL=c++_shared"
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+    "-DCMAKE_C_FLAGS=${ARCHIVE_PATH_MAP}" "-DCMAKE_CXX_FLAGS=${ARCHIVE_PATH_MAP}"
     RESULT_VARIABLE tls_configured)
 if(NOT tls_configured EQUAL 0)
     message(FATAL_ERROR "Android TLS configuration failed")

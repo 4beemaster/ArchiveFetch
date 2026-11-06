@@ -22,6 +22,7 @@
 #include "diag_log.hpp"
 #include "extract_protocol.hpp"
 #include "extractor_elf.hpp"
+#include "remove_tree.hpp"
 
 namespace archivefetch_diag {
 namespace {
@@ -229,7 +230,7 @@ ExtractOutcome run_extraction(const std::filesystem::path& archive, const std::f
     // The extractor ended without a result; a folder it had started belongs to this run and is removed.
     if (state == "running") {
         std::error_code ignored;
-        std::filesystem::remove_all(folder, ignored);
+        archive_catalog::remove_tree(folder, ignored);
     }
     if (stop_sent) return finish(Result::Cancelled, "stopped");
     return finish(Result::Failed, stalled ? "the extractor stopped making progress" : "the extractor stopped unexpectedly");
