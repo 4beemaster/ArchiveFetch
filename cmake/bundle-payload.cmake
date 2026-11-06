@@ -1,0 +1,16 @@
+# Copies the PS5 payload next to the app only when it was built from the same VERSION, so an app never offers a stale payload.
+# -DSOURCE=<build-ps5 directory> -DDESTINATION=<payload directory> -DEXPECTED=<version>
+set(elf "${SOURCE}/ArchiveFetch.elf")
+set(version_file "${SOURCE}/ArchiveFetch.version")
+set(built "")
+if(EXISTS "${elf}" AND EXISTS "${version_file}")
+    file(STRINGS "${version_file}" built LIMIT_COUNT 1)
+endif()
+if(built STREQUAL EXPECTED)
+    file(MAKE_DIRECTORY "${DESTINATION}")
+    file(COPY_FILE "${elf}" "${DESTINATION}/ArchiveFetch.elf" ONLY_IF_DIFFERENT)
+    file(WRITE "${DESTINATION}/ArchiveFetch.version" "${built}\n")
+else()
+    file(REMOVE "${DESTINATION}/ArchiveFetch.elf" "${DESTINATION}/ArchiveFetch.version")
+    message(STATUS "No PS5 payload ${EXPECTED} to bundle (build ps5/ first to offer Install/Update)")
+endif()

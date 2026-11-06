@@ -1,0 +1,69 @@
+include(FetchContent)
+FetchContent_Declare(web_http URL https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.3.tar.gz
+    URL_HASH SHA256=a0567bcd6c3fe5cef1b329b96245119047f876b49e06cc129a36a7a8dffe173e)
+FetchContent_Declare(web_json URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+    URL_HASH SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d)
+set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(web_http web_json)
+add_executable(archive_catalog_web src/web_main.cpp src/gui_platform.cpp)
+target_link_libraries(archive_catalog_web PRIVATE gui_model credential_store httplib::httplib nlohmann_json::nlohmann_json)
+target_compile_definitions(archive_catalog_web PRIVATE ARCHIVEFETCH_VERSION="${ARCHIVEFETCH_VERSION}")
+if(MINGW)
+    target_compile_options(archive_catalog_web PRIVATE -Wa,-mbig-obj)
+endif()
+if(WIN32)
+    set_target_properties(archive_catalog_web PROPERTIES WIN32_EXECUTABLE TRUE)
+    set(WEBVIEW_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(WEBVIEW_BUILD_STATIC_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(WEBVIEW_USE_COMPAT_MINGW ON CACHE BOOL "" FORCE)
+    FetchContent_Declare(microsoft_web_webview2
+        URL https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.1150.38
+        URL_HASH SHA256=921c004bd1764b585496b2eb3eec0a59a9a98e698246f1d9a3f1c08d1d84ebd5)
+    FetchContent_MakeAvailable(microsoft_web_webview2)
+    set(MSWebView2_ROOT "${microsoft_web_webview2_SOURCE_DIR}")
+    FetchContent_Declare(native_webview URL https://github.com/webview/webview/archive/refs/tags/0.12.0.tar.gz
+        URL_HASH SHA256=e2c8d0bed3fcd13e624074448b7d3b1d0b0d03546a15839f17ee0013f2cba1db)
+    FetchContent_MakeAvailable(native_webview)
+    target_link_libraries(archive_catalog_web PRIVATE webview::core shell32 ole32 uuid comdlg32 crypt32)
+endif()
+add_test(NAME web_api_tests COMMAND archive_catalog_web --smoke-test)
+set_tests_properties(web_api_tests PROPERTIES TIMEOUT 60)
+# Runs on every build so a newer PS5 build is picked up even when the app itself did not change.
+add_custom_target(bundle_payload ALL
+    COMMAND "${CMAKE_COMMAND}" -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/build-ps5 -DDESTINATION=$<TARGET_FILE_DIR:archive_catalog_web>/payload
+        -DEXPECTED=${ARCHIVEFETCH_VERSION} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bundle-payload.cmake
+    VERBATIM)
+add_dependencies(bundle_payload archive_catalog_web)
+set(WEB_ASSETS "${CMAKE_CURRENT_BINARY_DIR}/web")
+file(MAKE_DIRECTORY "${WEB_ASSETS}/assets")
+function(web_asset filename url checksum)
+    set(destination "${WEB_ASSETS}/assets/${filename}")
+    if(EXISTS "${destination}")
+        file(SHA256 "${destination}" actual)
+        if(actual STREQUAL checksum)
+            return()
+        endif()
+    endif()
+    file(DOWNLOAD "${url}" "${destination}" EXPECTED_HASH "SHA256=${checksum}" TLS_VERIFY ON)
+endfunction()
+web_asset(Karla.ttf https://raw.githubusercontent.com/google/fonts/130fcfb0ff422fec96b335616b2ca99f91914792/ofl/karla/Karla%5Bwght%5D.ttf
+    ed3ca4cd9bdd899c543927c30bf5ff50706b24b3f2b7328e64b25f7d2a9d23dc)
+web_asset(Karla-OFL.txt https://raw.githubusercontent.com/google/fonts/130fcfb0ff422fec96b335616b2ca99f91914792/ofl/karla/OFL.txt
+    edf2c840acb9570fe02f40721126aa0da4e4011a0030cc6dce30780569f609b6)
+web_asset(fa-solid-900.ttf https://raw.githubusercontent.com/FortAwesome/Font-Awesome/6.7.2/webfonts/fa-solid-900.ttf
+    af19d135d3a935b3ebfbd80320716ffe1202052c5f68dc2c5f1abc57005ac605)
+web_asset(Font-Awesome-LICENSE.txt https://raw.githubusercontent.com/FortAwesome/Font-Awesome/6.7.2/LICENSE.txt
+    9b914eae88817d63b576eab5aafde7068c7a1abae125d7cdfb034f1da43a9afc)
+web_asset(qrcode.js https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js
+    164fc2c1c9eaf0a03aa8dfdb855e82e41a5c6922fbad8bb3238116207e26bef7)
+web_asset(qrcode-LICENSE.txt https://raw.githubusercontent.com/kazuhikoarase/qrcode-generator/master/LICENSE
+    3a850fa5f08101db6f40676c2786e10bd2cd5fff7b12ffdf1e0c434d4e49d90c)
+foreach(asset IN ITEMS index.html app.css app-core.js app-library.js app-sources.js app-columns.js app-dialogs.js app-consoles.js app-main.js)
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/web/${asset}" "${WEB_ASSETS}/${asset}" COPYONLY)
+endforeach()
+configure_file("${web_http_SOURCE_DIR}/LICENSE" "${WEB_ASSETS}/assets/cpp-httplib-LICENSE.txt" COPYONLY)
+configure_file("${web_json_SOURCE_DIR}/LICENSE.MIT" "${WEB_ASSETS}/assets/nlohmann-json-LICENSE.txt" COPYONLY)
+if(WIN32)
+    configure_file("${native_webview_SOURCE_DIR}/LICENSE" "${WEB_ASSETS}/assets/webview-LICENSE.txt" COPYONLY)
+    configure_file("${microsoft_web_webview2_SOURCE_DIR}/LICENSE.txt" "${WEB_ASSETS}/assets/WebView2-LICENSE.txt" COPYONLY)
+endif()

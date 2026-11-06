@@ -1,0 +1,93 @@
+plugins { id 'com.android.application' }
+def archiveAbi = providers.gradleProperty('archiveAbi').getOrElse('arm64-v8a')
+if (archiveAbi != 'arm64-v8a') layout.buildDirectory.set(file("build-${archiveAbi}"))
+// 0.6.0-beta.1 -> code 6001; the 0.6.0 release -> 6099, so every later build installs over an earlier one.
+def archiveVersion = rootProject.file('../VERSION').text.trim()
+def versionMatch = archiveVersion =~ /^(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$/
+if (!versionMatch.matches()) throw new GradleException("VERSION must look like 1.2.3 or 1.2.3-beta.4, not ${archiveVersion}")
+def archiveVersionCode = versionMatch.group(1).toInteger() * 100000 + versionMatch.group(2).toInteger() * 1000 +
+    versionMatch.group(3).toInteger() * 100 + (versionMatch.group(4) ? versionMatch.group(4).toInteger() : 99)
+
+android {
+    namespace 'org.archivecatalog.app'
+    compileSdk 36
+    ndkVersion '28.2.13676358'
+    defaultConfig {
+        applicationId 'org.archivecatalog.app'
+        minSdk 26
+        targetSdk 36
+        versionCode archiveVersionCode
+        versionName archiveVersion
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+        ndk { abiFilters archiveAbi }
+        externalNativeBuild {
+            cmake {
+                arguments '-DANDROID_STL=c++_shared',
+                    "-DANDROID_LICENSE_DIR=${layout.buildDirectory.get()}/generated/nativeLicenses/licenses"
+                targets 'archive_android'
+            }
+        }
+    }
+    externalNativeBuild { cmake { path '../CMakeLists.txt'; version '3.22.1' } }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+    sourceSets.main.assets.srcDirs = ["${layout.buildDirectory.get()}/generated/web", "${layout.buildDirectory.get()}/generated/nativeLicenses", "${layout.buildDirectory.get()}/generated/payload"]
+    packaging { jniLibs { useLegacyPackaging = false } }
+    lint { abortOnError true }
+}
+dependencies {
+    implementation 'androidx.core:core:1.16.0'
+    implementation 'androidx.webkit:webkit:1.12.1'
+    androidTestImplementation 'androidx.test:runner:1.6.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+    androidTestImplementation 'androidx.test.uiautomator:uiautomator:2.3.0'
+}
+dependencyLocking { lockAllConfigurations() }
+
+def prepareWeb = tasks.register('prepareWebAssets') {
+    inputs.dir('../../web')
+    outputs.dir(layout.buildDirectory.dir('generated/web'))
+    doLast {
+        def destination = layout.buildDirectory.dir('generated/web').get().asFile
+        copy { from '../../web'; into destination }
+        def assets = new File(destination, 'assets')
+        assets.mkdirs()
+        def fonts = [
+            'Karla.ttf': ['https://raw.githubusercontent.com/google/fonts/130fcfb0ff422fec96b335616b2ca99f91914792/ofl/karla/Karla%5Bwght%5D.ttf', 'ed3ca4cd9bdd899c543927c30bf5ff50706b24b3f2b7328e64b25f7d2a9d23dc'],
+            'Karla-OFL.txt': ['https://raw.githubusercontent.com/google/fonts/130fcfb0ff422fec96b335616b2ca99f91914792/ofl/karla/OFL.txt', 'edf2c840acb9570fe02f40721126aa0da4e4011a0030cc6dce30780569f609b6'],
+            'fa-solid-900.ttf': ['https://raw.githubusercontent.com/FortAwesome/Font-Awesome/6.7.2/webfonts/fa-solid-900.ttf', 'af19d135d3a935b3ebfbd80320716ffe1202052c5f68dc2c5f1abc57005ac605'],
+            'Font-Awesome-LICENSE.txt': ['https://raw.githubusercontent.com/FortAwesome/Font-Awesome/6.7.2/LICENSE.txt', '9b914eae88817d63b576eab5aafde7068c7a1abae125d7cdfb034f1da43a9afc']
+        ]
+        fonts.each { name, pin ->
+            def file = new File(assets, name)
+            def cached = project.file("../../build/web/assets/${name}")
+            if (cached.exists()) file.bytes = cached.bytes
+            else file.bytes = new URI(pin[0]).toURL().bytes
+            def hash = java.security.MessageDigest.getInstance('SHA-256').digest(file.bytes).encodeHex().toString()
+            if (hash != pin[1]) { file.delete(); throw new GradleException("Asset checksum mismatch: ${name}") }
+        }
+    }
+}
+// The PS5 payload is bundled only when it was built from the same VERSION, so the app never offers a stale one.
+def preparePayload = tasks.register('preparePayload') {
+    def source = rootProject.file('../build-ps5')
+    inputs.property('version', archiveVersion)
+    inputs.files(fileTree(source) { include 'ArchiveFetch.elf', 'ArchiveFetch.version' })
+    outputs.dir(layout.buildDirectory.dir('generated/payload'))
+    doLast {
+        def destination = layout.buildDirectory.dir('generated/payload/payload').get().asFile
+        project.delete(destination)
+        def elf = new File(source, 'ArchiveFetch.elf'), built = new File(source, 'ArchiveFetch.version')
+        if (elf.exists() && built.exists() && built.text.trim() == archiveVersion) {
+            destination.mkdirs()
+            copy { from elf, built; into destination }
+        } else logger.lifecycle("No PS5 payload ${archiveVersion} to bundle (build ps5/ first to offer Install/Update)")
+    }
+}
+android.applicationVariants.all { variant ->
+    tasks.named("merge${variant.name.capitalize()}Assets").configure {
+        dependsOn prepareWeb, preparePayload, "externalNativeBuild${variant.name.capitalize()}"
+    }
+}
+tasks.configureEach {
+    if (name.toLowerCase(Locale.ROOT).contains('lint')) dependsOn prepareWeb, preparePayload
+}
