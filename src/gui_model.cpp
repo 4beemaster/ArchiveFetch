@@ -665,10 +665,22 @@ void GuiModel::start_downloads(Config config, Download download, std::uint64_t r
                 auto entry = find_entry();
                 return entry == state_.queue.end() || entry->removal_requested;
             };
-            hooks.progress = [this, find_entry](std::uint64_t received, std::uint64_t) {
+            // Resumed bytes are not counted: the first report only sets the starting point.
+            struct Speed { std::chrono::steady_clock::time_point at; std::uint64_t bytes = 0; bool started = false; double rate = 0; };
+            auto speed = std::make_shared<Speed>();
+            hooks.progress = [this, find_entry, speed](std::uint64_t received, std::uint64_t) {
+                const auto now = std::chrono::steady_clock::now();
                 std::lock_guard<std::mutex> lock(mutex_);
                 auto entry = find_entry();
-                if (entry != state_.queue.end()) entry->received = std::min(received, entry->file.size);
+                if (entry == state_.queue.end()) return;
+                entry->received = std::min(received, entry->file.size);
+                if (!speed->started) { speed->started = true; speed->at = now; speed->bytes = received; return; }
+                const double seconds = std::chrono::duration<double>(now - speed->at).count();
+                if (seconds < 1) return;
+                const double sample = received > speed->bytes ? static_cast<double>(received - speed->bytes) / seconds : 0;
+                speed->rate = speed->rate == 0 ? sample : speed->rate * 0.7 + sample * 0.3;
+                speed->at = now; speed->bytes = received;
+                entry->rate = static_cast<std::uint64_t>(speed->rate);
             };
             hooks.status = [this, find_entry](const std::string& text) {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -678,14 +690,14 @@ void GuiModel::start_downloads(Config config, Download download, std::uint64_t r
             hooks.stage = [this, find_entry](const std::string& stage, std::uint64_t done, std::uint64_t total) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 auto entry = find_entry();
-                if (entry != state_.queue.end()) { entry->stage = stage; entry->stage_done = done; entry->stage_total = total; }
+                if (entry != state_.queue.end()) { entry->stage = stage; entry->stage_done = done; entry->stage_total = total; entry->rate = 0; }
             };
             bool stopped = false;
             std::string failure;
             try {
                 if (download) download(queued.file, queued.destination, queued.overwrite, hooks);
                 else {
-                    Http http(config.ca_bundle, hooks, config.s3);
+                    Http http(config.ca_bundle, hooks, config.s3, config.download_connections);
                     http.download(queued.file, queued.destination, queued.overwrite);
                 }
             } catch (const OperationCancelled&) { stopped = true; }
@@ -695,6 +707,7 @@ void GuiModel::start_downloads(Config config, Download download, std::uint64_t r
                 auto entry = find_entry();
                 if (entry != state_.queue.end()) {
                     entry->stage.clear();
+                    entry->rate = 0;
                     if (entry->removal_requested) {
                         try {
                             if (!stopped && failure.empty()) ++state_.download_revision;

@@ -10,7 +10,9 @@ void require(bool condition, const char* message) {
 }
 
 // A stand-in ELF loader on loopback: it reads one payload, then the stand-in console reports the new version.
-void install_smoke(const std::filesystem::path& root, int console_port, std::mutex& mutex, std::string& console_version) {
+// Then the stand-in console takes the payload itself on /api/update, as ArchiveFetch 0.7.2 and later do.
+struct ConsoleUpdate { bool& outside; bool& self_update; bool& loader_down; std::size_t& uploaded; };
+void install_smoke(const std::filesystem::path& root, int console_port, std::mutex& mutex, std::string& console_version, const ConsoleUpdate& update) {
     const auto payload = root / "payload";
     std::filesystem::create_directories(payload);
     const std::string elf(300000, 'E');
@@ -50,22 +52,59 @@ void install_smoke(const std::filesystem::path& root, int console_port, std::mut
     const auto id = installer.command({{"action", "add"}, {"name", "Install"}, {"address", "127.0.0.1"}, {"port", console_port}, {"loader", loader_port}})
         .at("consoles").at(0).at("id").get<std::string>();
     installer.command({{"action", "install"}, {"id", id}});
-    Json install;
-    for (int attempt = 0; attempt < 150; ++attempt) {
-        install = installer.list().at("consoles").at(0).value("install", Json::object());
-        if (!install.value("running", true)) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
+    const auto finished = [&] {
+        Json state;
+        for (int attempt = 0; attempt < 150; ++attempt) {
+            state = installer.list().at("consoles").at(0).value("install", Json::object());
+            if (!state.value("running", true)) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        return state;
+    };
+    Json install = finished();
     loader.join();
 #ifdef _WIN32
     closesocket(server);
 #else
     close(server);
 #endif
-    require(install.value("stage", "") == "done" && install.at("sent") == elf.size() && received == elf.size(),
+    require(install.value("stage", "") == "done" && install.at("sent") == elf.size() && received == elf.size() && install.value("route", "") == "loader",
         "Install sends the bundled payload to the loader and waits for the new version");
     std::ifstream saved(root / "install-consoles.json", std::ios::binary);
     require(Json::parse(saved).at("consoles").at(0).at("loader") == loader_port, "A console's loader port is saved");
+
+    const auto status = [&](const char* field) {
+        Json listed;
+        for (int attempt = 0; attempt < 100; ++attempt) {
+            listed = installer.list(true).at("consoles").at(0);
+            if (listed.value(field, false)) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        return listed;
+    };
+    { std::lock_guard<std::mutex> guard(mutex); console_version = "0.6.0"; update.self_update = true; update.loader_down = true; }
+    auto listed = status("selfUpdate");
+    require(listed.value("older", false) && listed.value("selfUpdate", false) && !listed.value("newer", true), "A console that can update itself is reported");
+    installer.command({{"action", "install"}, {"id", id}});
+    install = finished();
+    require(install.value("stage", "") == "failed" && install.value("error", "") == "Sign in to the console first, then update" && install.value("route", "") == "console",
+        "Updating through ArchiveFetch on the console needs sign-in");
+    { std::lock_guard<std::mutex> guard(mutex); update.outside = false; }
+    installer.command({{"action", "install"}, {"id", id}});
+    install = finished();
+    require(install.value("stage", "") == "failed" && install.value("error", "") == "The console's ELF loader did not accept the update",
+        "A loader failure on the console is reported");
+    { std::lock_guard<std::mutex> guard(mutex); update.loader_down = false; }
+    installer.command({{"action", "install"}, {"id", id}});
+    install = finished();
+    {
+        std::lock_guard<std::mutex> guard(mutex);
+        require(install.value("stage", "") == "done" && install.at("sent") == elf.size() && update.uploaded == elf.size(),
+            "Update goes through ArchiveFetch on port 8890 when the console supports it");
+        console_version = "99.0.0";
+    }
+    listed = status("newer");
+    require(listed.value("newer", false) && !listed.value("older", true), "A console with a newer ArchiveFetch is reported as newer");
 }
 
 // Two separate backends stand in for this device and a console; the page sends the export of one to the other.
@@ -126,7 +165,8 @@ void console_smoke(httplib::Client& client, const httplib::Headers& headers, con
     httplib::Server console;
     std::mutex mutex;
     std::string token = "first-token", seen_host, console_version = "0.6.0";
-    bool outside = false;
+    bool outside = false, self_update = false, loader_down = false;
+    std::size_t uploaded = 0;
     std::map<std::string, std::string> devices;
     // Callers hold mutex.
     const auto paired = [&](const httplib::Request& request) {
@@ -138,8 +178,8 @@ void console_smoke(httplib::Client& client, const httplib::Headers& headers, con
     console.Get("/session", [&](const httplib::Request& request, httplib::Response& response) {
         std::lock_guard<std::mutex> guard(mutex);
         seen_host = request.get_header_value("Host");
-        if (outside && !signed_in(request)) { response.status = 401; response.set_content(Json({{"error", "Sign in required"}, {"login", true}, {"version", console_version}, {"pairing", true}}).dump(), "application/json"); return; }
-        response.set_content(Json({{"token", token}, {"version", console_version}, {"folderBrowser", true}, {"pairing", true}, {"paired", paired(request)}}).dump(), "application/json");
+        if (outside && !signed_in(request)) { response.status = 401; response.set_content(Json({{"error", "Sign in required"}, {"login", true}, {"version", console_version}, {"pairing", true}, {"selfUpdate", self_update}}).dump(), "application/json"); return; }
+        response.set_content(Json({{"token", token}, {"version", console_version}, {"folderBrowser", true}, {"pairing", true}, {"paired", paired(request)}, {"selfUpdate", self_update}}).dump(), "application/json");
     });
     console.Post("/api/login", [&](const httplib::Request& request, httplib::Response& response) {
         if (Json::parse(request.body).value("password", "") != "console-password") { response.status = 401; response.set_content(R"({"error":"Wrong password"})", "application/json"); return; }
@@ -166,6 +206,19 @@ void console_smoke(httplib::Client& client, const httplib::Headers& headers, con
         response.set_content(Json({{"id", id}, {"key", key}, {"name", Json::parse(request.body).at("name")}}).dump(), "application/json");
     });
     console.Get("/api/refused", [](const httplib::Request&, httplib::Response& response) { response.status = 403; response.set_content("Turn on External connections\n", "text/plain"); });
+    console.Post("/api/update", [&](const httplib::Request& request, httplib::Response& response, const httplib::ContentReader& content) {
+        if (!guarded(request, response)) return;
+        std::string body;
+        content([&](const char* data, size_t size) { body.append(data, size); return true; });
+        std::lock_guard<std::mutex> guard(mutex);
+        if (request.get_header_value("Content-Type") != "application/octet-stream" || request.get_header_value("X-ArchiveFetch-Version") != ARCHIVEFETCH_VERSION) {
+            response.status = 400; response.set_content(R"({"error":"Bad update"})", "application/json"); return;
+        }
+        if (loader_down) { response.status = 502; response.set_content(R"({"error":"The console's ELF loader did not accept the update"})", "application/json"); return; }
+        uploaded = body.size();
+        console_version = ARCHIVEFETCH_VERSION;
+        response.set_content(Json({{"ok", true}, {"bytes", body.size()}}).dump(), "application/json");
+    });
     const int port = console.bind_to_any_port("127.0.0.1");
     require(port > 0, "Stand-in console started");
     std::thread listener([&] { console.listen_after_bind(); });
@@ -269,7 +322,7 @@ void console_smoke(httplib::Client& client, const httplib::Headers& headers, con
         std::ifstream input(root / "consoles.json", std::ios::binary);
         const auto file = Json::parse(input).at("consoles");
         require(file.size() == 1 && file.at(0).at("name") == "Bedroom" && file.dump().find("granted") == std::string::npos, "Consoles are saved without sign-ins");
-        install_smoke(root, port, mutex, console_version);
+        install_smoke(root, port, mutex, console_version, {outside, self_update, loader_down, uploaded});
     } catch (...) { console.stop(); listener.join(); throw; }
     console.stop(); listener.join();
 }
@@ -335,6 +388,16 @@ void web_smoke(httplib::Server& server, WebApplication& application, int port, c
             read_config(application.settings, true).excluded_extensions.empty(), "A hidden file type can be shown again");
         excluded["excludedExtensions"] = format_extension_list(default_excluded_extensions());
         result = send(excluded); require(result && result->status == 200, "Default hidden types restored");
+        require(application.config.download_connections == 4 && Json::parse(client.Get("/api/state", headers)->body).at("settings").at("maxConnections") == 8,
+            "Downloads use 4 connections unless changed");
+        for (const Json bad : {Json(0), Json(9), Json("6"), Json(2.5)}) {
+            auto connections = base; connections["connections"] = bad;
+            result = send(connections); require(result && result->status == 400 && application.config.download_connections == 4, "Invalid connection counts rejected");
+        }
+        auto connections = base; connections["connections"] = 6;
+        result = send(connections);
+        require(result && result->status == 200 && application.config.download_connections == 6 && read_config(application.settings, true).download_connections == 6,
+            "The connection count is saved with the settings");
     }
     result = send({{"action", "sourceTags"}, {"url", "https://archive.org/details/archive-web-test"}, {"tags", {"PS2", "A & B", "ps2"}}});
     require(result && result->status == 200, "Source tags updated through the API");
@@ -479,7 +542,11 @@ void web_smoke(httplib::Server& server, WebApplication& application, int port, c
                 return;
             }
             const auto& release = file.name == first_name ? release_first : release_later;
-            while (!release && !hooks.cancelled()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            std::uint64_t sent = 0;
+            while (!release && !hooks.cancelled()) {
+                if (file.name == first_name) hooks.progress(sent += 1000, 0);
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
         });
         const auto fetch = [](const std::string& url) {
             return std::string(url.find("_meta.xml") != std::string::npos ? "<metadata><title>Added</title></metadata>" :
@@ -515,6 +582,13 @@ void web_smoke(httplib::Server& server, WebApplication& application, int port, c
             require(!queued.contains("confirmOverwrite") && !queued.contains("locationConflicts"), "Queueing while a download runs needs no prompt");
         }
         require(parallel.model.snapshot().queue.size() == 3, "Files can be queued while a download runs");
+        Json rated;
+        for (int attempt = 0; attempt < 60; ++attempt) {
+            rated = parallel.snapshot().at("queue").at(0);
+            if (rated.value("rate", 0) > 0) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        require(rated.value("rate", 0) > 0 && parallel.snapshot().at("queue").at(1).value("rate", 1) == 0, "A transferring download reports its speed");
         release_first = true;
         const auto wait_for = [&](const std::function<bool(const GuiSnapshot&)>& condition) {
             for (int attempt = 0; attempt < 1000; ++attempt) {

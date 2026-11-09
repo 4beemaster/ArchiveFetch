@@ -27,6 +27,7 @@ struct Config {
     bool automatically_start_downloads = true;
     bool extract_archives = false;
     bool delete_extracted_archives = false;
+    int download_connections = default_download_connections;
     // Hides files of these types from the Library unless they are downloaded; the catalog keeps them.
     std::vector<std::string> excluded_extensions = default_excluded_extensions();
     bool debug_window = false;

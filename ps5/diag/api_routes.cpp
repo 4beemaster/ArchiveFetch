@@ -79,6 +79,8 @@ constexpr std::size_t paired_limit = 32;
 constexpr const char* device_header = "X-ArchiveFetch-Device";
 std::map<std::string, PairedDevice> paired;
 std::filesystem::path paired_path;
+// Where /api/update keeps a received payload until the loader has it.
+std::filesystem::path update_path;
 
 long long now_seconds() { return static_cast<long long>(std::time(nullptr)); }
 
@@ -506,6 +508,12 @@ httplib::Server::Handler guarded(bool needs_session, ApiHandler handler) {
 }
 
 bool api_accept_peer(const httplib::Request& request, httplib::Response& response) {
+    // Only /api/update takes large bodies; anything else over 1 MB, or without a length, is refused before it is read.
+    if (request.path != "/api/update" && (request.has_header("Transfer-Encoding") || request.get_header_value_u64("Content-Length") > small_body_limit)) {
+        response.status = 413;
+        set_json(response, "{\"error\":\"Request too large\"}");
+        return false;
+    }
     if (local_peer(request.remote_addr)) return true;
     const char* reason = !external_access.load() ? "external" : !password_set() ? "no-password" : nullptr;
     if (!reason) {
@@ -541,6 +549,7 @@ bool api_init(const char* data_root) {
         grants_path = root / "sign-ins.json";
         load_grants();
         paired_path = root / "paired-devices.json";
+        update_path = root / "update" / "ArchiveFetch.elf";
         load_paired();
         try {
             if (std::filesystem::exists(network_settings)) {
@@ -594,12 +603,76 @@ void api_register_routes(httplib::Server& http) {
         const auto device = paired_device(request);
         if (!local && !signed_in(request) && device.empty()) {
             response.status = 401;
-            set_json(response, Json({{"error", "Sign in required"}, {"login", true}, {"version", version}, {"pairing", true}}).dump());
+            set_json(response, Json({{"error", "Sign in required"}, {"login", true}, {"version", version}, {"pairing", true}, {"selfUpdate", true}}).dump());
             return;
         }
         set_json(response, Json({{"token", session_token}, {"network", true}, {"folderBrowser", true}, {"version", version},
-            {"remoteAccess", true}, {"logFile", true}, {"signedIn", !local}, {"pairing", true}, {"paired", !device.empty()}}).dump());
+            {"remoteAccess", true}, {"logFile", true}, {"signedIn", !local}, {"pairing", true}, {"paired", !device.empty()}, {"selfUpdate", true}}).dump());
     }));
+    // The apps send a newer ArchiveFetch here; this copy hands it to the console's own loader on 127.0.0.1,
+    // so the loader port never has to be reachable from other devices. Same access rules as every other /api route.
+    http.Post("/api/update", [](const httplib::Request& request, httplib::Response& response, const httplib::ContentReader& content) {
+        if (const char* reason = denial(request, true)) {
+            log_event("API_ACCESS_DENIED", {field("reason", reason), field("path", request.path.c_str()), field("peer", request.remote_addr.c_str())});
+            response.status = 403;
+            set_json(response, "{\"error\":\"Access denied\"}");
+            return;
+        }
+        const auto length = request.get_header_value_u64("Content-Length");
+        if (request.get_header_value("Content-Type") != "application/octet-stream" || request.has_header("Transfer-Encoding") || length < 4096 || length > update_body_limit) {
+            response.status = 400;
+            set_json(response, "{\"error\":\"Send the PS5 payload as one file of up to 64 MB\"}");
+            return;
+        }
+        static std::atomic<bool> updating{false};
+        bool idle = false;
+        if (!updating.compare_exchange_strong(idle, true)) {
+            response.status = 409;
+            set_json(response, "{\"error\":\"Another update is being installed\"}");
+            return;
+        }
+        struct Done { ~Done() { updating = false; } } done;
+        std::error_code ignored;
+        std::filesystem::create_directories(update_path.parent_path(), ignored);
+        auto part = update_path;
+        part += ".part";
+        std::uint64_t received = 0;
+        std::string head;
+        bool written = false;
+        {
+            std::ofstream output(part, std::ios::binary | std::ios::trunc);
+            written = content([&](const char* data, size_t size) {
+                if (head.size() < 4) head.append(data, std::min(size, 4 - head.size()));
+                output.write(data, static_cast<std::streamsize>(size));
+                received += size;
+                return static_cast<bool>(output) && received <= length;
+            });
+            output.close();
+            written = written && static_cast<bool>(output);
+        }
+        if (!written || received != length || head != std::string("\x7f" "ELF")) {
+            unlink(part.c_str());
+            log_event("UPDATE_REJECTED", {field("bytes", static_cast<long long>(received)), field("peer", request.remote_addr.c_str())});
+            response.status = 400;
+            set_json(response, "{\"error\":\"That is not a complete PS5 payload\"}");
+            return;
+        }
+        rename(part.c_str(), update_path.c_str());
+        const auto offered = request.get_header_value("X-ArchiveFetch-Version").substr(0, 32);
+        log_event("UPDATE_RECEIVED", {field("bytes", static_cast<long long>(received)), field("version", offered.c_str()), field("peer", request.remote_addr.c_str())});
+        std::string error;
+        const bool sent = send_to_local_loader(update_path, error);
+        unlink(update_path.c_str());
+        if (!sent) {
+            log_event("UPDATE_FAILED", {field("error", error.c_str())});
+            response.status = 502;
+            set_json(response, Json({{"error", "The console's ELF loader did not accept the update (" + error + "); start the loader on the console and try again"}}).dump());
+            return;
+        }
+        // The new copy starts and asks this one to stop; the reply goes out before that.
+        log_event("UPDATE_SENT", {field("bytes", static_cast<long long>(received)), field("version", offered.c_str())});
+        set_json(response, Json({{"ok", true}, {"bytes", received}}).dump());
+    });
     // An app pairs once (from the local network, or after signing in from outside) and then needs no password.
     http.Post("/api/pair", guarded(true, [](const httplib::Request& request, httplib::Response& response) {
         try {

@@ -16,6 +16,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -100,6 +101,31 @@ std::string size_text(unsigned long long bytes) {
     return text;
 }
 
+}
+
+bool send_to_local_loader(const std::filesystem::path& elf, std::string& error) {
+    std::ifstream input(elf, std::ios::binary);
+    if (!input) { error = "cannot read the payload"; return false; }
+    int code = 0;
+    const int loader = connect_local(archivefetch_extract::loader_port, 5000, &code);
+    if (loader < 0) { error = std::strerror(code); return false; }
+    timeval timeout{30, 0};
+    setsockopt(loader, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    std::vector<char> buffer(65536);
+    bool sent = true;
+    while (sent && input) {
+        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        for (std::streamsize offset = 0, size = input.gcount(); offset < size;) {
+            const ssize_t written = send(loader, buffer.data() + offset, static_cast<size_t>(size - offset), 0);
+            if (written <= 0) { error = std::strerror(errno); sent = false; break; }
+            offset += written;
+        }
+    }
+    shutdown(loader, SHUT_WR);
+    // Give the loader a moment to read everything and close its side first.
+    readable(loader, 2000);
+    close(loader);
+    return sent;
 }
 
 ExtractOutcome run_extraction(const std::filesystem::path& archive, const std::filesystem::path& folder,

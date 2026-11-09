@@ -242,12 +242,6 @@ void regular_or_missing(const std::filesystem::path& path) {
     }
 }
 
-#ifdef PS5_PAYLOAD
-// One connection is capped by the console's 512 KiB receive buffer.
-constexpr int download_connections = 4;
-#else
-constexpr int download_connections = 1;
-#endif
 constexpr std::uint64_t segmented_minimum = 32ULL * 1024 * 1024;
 
 // Parts after the first exist from the start of a split download until the parts are joined.
@@ -270,6 +264,9 @@ struct Segment {
     Headers headers{nullptr, curl_slist_free_all};
     std::array<char, CURL_ERROR_SIZE> error{};
     SocketInfo socket;
+    int attempts = 0;
+    bool waiting = false;
+    std::chrono::steady_clock::time_point retry_at;
 };
 
 std::size_t segment_write(char* data, std::size_t size, std::size_t count, void* opaque) noexcept {
@@ -320,31 +317,41 @@ void download_segments(const File& file, const std::filesystem::path& partial, i
         throw std::runtime_error("Insufficient space for " + file.name);
     MultiGuard multi{curl_multi_init(), {}};
     if (!multi.multi) throw std::runtime_error("Cannot create download connections");
+    // Each part resumes from what it has written, also when it is restarted after a refusal.
+    const auto start = [&](Segment& segment) {
+        segment.handle = request(download_url(file), ca_bundle, quiet);
+        auto* handle = segment.handle.get();
+#ifdef PS5_PAYLOAD
+        option(handle, CURLOPT_SOCKOPTFUNCTION, enlarge_receive_buffer);
+        option(handle, CURLOPT_SOCKOPTDATA, &segment.socket);
+#endif
+        option(handle, CURLOPT_BUFFERSIZE, 512L * 1024L);
+        const auto range = std::to_string(segment.start + segment.sink.received) + "-" + std::to_string(segment.start + segment.length - 1);
+        option(handle, CURLOPT_RANGE, range.c_str());
+        option(handle, CURLOPT_WRITEFUNCTION, segment_write);
+        option(handle, CURLOPT_WRITEDATA, &segment);
+        option(handle, CURLOPT_ERRORBUFFER, segment.error.data());
+        segment.error[0] = 0;
+        segment.range_checked = false;
+        segment.headers = authorize(handle, authorization);
+        if (curl_multi_add_handle(multi.multi, handle) != CURLM_OK) throw std::runtime_error("Cannot start a download connection");
+        multi.added.push_back(handle);
+    };
     for (auto& segment : segments) {
         if (segment->resumed == segment->length) continue;
         segment->buffer.resize(1024 * 1024);
         segment->sink.stream.rdbuf()->pubsetbuf(segment->buffer.data(), static_cast<std::streamsize>(segment->buffer.size()));
         segment->sink.stream.open(segment->path, std::ios::binary | std::ios::app);
         if (!segment->sink.stream) throw std::runtime_error("Cannot write " + segment->path.string());
-        segment->handle = request(download_url(file), ca_bundle, quiet);
-        auto* handle = segment->handle.get();
-#ifdef PS5_PAYLOAD
-        option(handle, CURLOPT_SOCKOPTFUNCTION, enlarge_receive_buffer);
-        option(handle, CURLOPT_SOCKOPTDATA, &segment->socket);
-#endif
-        option(handle, CURLOPT_BUFFERSIZE, 512L * 1024L);
-        const auto range = std::to_string(segment->start + segment->resumed) + "-" + std::to_string(segment->start + segment->length - 1);
-        option(handle, CURLOPT_RANGE, range.c_str());
-        option(handle, CURLOPT_WRITEFUNCTION, segment_write);
-        option(handle, CURLOPT_WRITEDATA, segment.get());
-        option(handle, CURLOPT_ERRORBUFFER, segment->error.data());
-        segment->headers = authorize(handle, authorization);
-        if (curl_multi_add_handle(multi.multi, handle) != CURLM_OK) throw std::runtime_error("Cannot start a download connection");
-        multi.added.push_back(handle);
+        start(*segment);
     }
     const auto started = std::chrono::steady_clock::now();
     int running = static_cast<int>(multi.added.size());
-    while (running) {
+    const auto waiting = [&] { return std::any_of(segments.begin(), segments.end(), [](const auto& segment) { return segment->waiting; }); };
+    while (running || waiting()) {
+        const auto now = std::chrono::steady_clock::now();
+        for (auto& segment : segments)
+            if (segment->waiting && now >= segment->retry_at) { segment->waiting = false; start(*segment); }
         if (curl_multi_perform(multi.multi, &running) != CURLM_OK) throw std::runtime_error("Download connections failed");
         int queued = 0;
         while (auto* message = curl_multi_info_read(multi.multi, &queued)) {
@@ -352,14 +359,28 @@ void download_segments(const File& file, const std::filesystem::path& partial, i
             check_cancelled(hooks);
             const auto found = std::find_if(segments.begin(), segments.end(), [&](const auto& segment) { return segment->handle.get() == message->easy_handle; });
             if (found == segments.end()) continue;
-            if ((*found)->range_ignored) throw std::runtime_error("Archive.org ignored a byte range request for " + file.name);
-            check_result(message->easy_handle, message->data.result, (*found)->error.data(), !authorization.empty());
+            auto& segment = **found;
+            if (segment.range_ignored) throw std::runtime_error("Archive.org ignored a byte range request for " + file.name);
+            try {
+                check_result(message->easy_handle, message->data.result, segment.error.data(), !authorization.empty());
+            } catch (const RequestError& error) {
+                // A refused or dropped part waits and continues on its own; the other parts keep going.
+                if (!retryable(error) || segment.attempts >= 5) throw;
+                const auto delay = std::max<curl_off_t>(curl_off_t{1} << segment.attempts, error.retry_after);
+                ++segment.attempts;
+                std::cerr << "Download part of " << file.name << " failed: " << error.what() << "; retrying in " << delay << " seconds\n";
+                auto* handle = segment.handle.get();
+                curl_multi_remove_handle(multi.multi, handle);
+                multi.added.erase(std::remove(multi.added.begin(), multi.added.end(), handle), multi.added.end());
+                segment.waiting = true;
+                segment.retry_at = std::chrono::steady_clock::now() + std::chrono::seconds(delay);
+            }
         }
         std::uint64_t received = 0;
         for (const auto& segment : segments) received += segment->sink.received;
         if (hooks.progress) hooks.progress(received, file.size);
         check_cancelled(hooks);
-        if (running && curl_multi_poll(multi.multi, nullptr, 0, 250, nullptr) != CURLM_OK) throw std::runtime_error("Download connections failed");
+        if ((running || waiting()) && curl_multi_poll(multi.multi, nullptr, 0, 250, nullptr) != CURLM_OK) throw std::runtime_error("Download connections failed");
     }
     const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count();
     bool html = false;
@@ -455,8 +476,9 @@ std::filesystem::path partial_segment(const std::filesystem::path& partial, int 
     return path;
 }
 
-Http::Http(std::string ca_bundle, TransferHooks hooks, S3Credentials s3)
-    : ca_bundle_(std::move(ca_bundle)), hooks_(std::move(hooks)), s3_(std::move(s3)) {
+Http::Http(std::string ca_bundle, TransferHooks hooks, S3Credentials s3, int connections)
+    : ca_bundle_(std::move(ca_bundle)), hooks_(std::move(hooks)), s3_(std::move(s3)),
+      connections_(std::clamp(connections, 1, max_download_connections)) {
     s3_.authorization();
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) throw std::runtime_error("Cannot initialize curl");
 }
@@ -545,8 +567,8 @@ void Http::download(const File& file, const std::filesystem::path& directory, bo
     auto partial = std::filesystem::path(target.string() + ".part");
     const int segments = existing_segments(partial);
     auto offset = std::filesystem::exists(partial) ? std::filesystem::file_size(partial) : 0;
-    if (segments > 1 || (download_connections > 1 && offset == 0 && file.size >= segmented_minimum)) {
-        download_segments(file, partial, segments > 1 ? segments : download_connections, ca_bundle_, hooks_, s3_);
+    if (segments > 1 || (connections_ > 1 && offset == 0 && file.size >= segmented_minimum)) {
+        download_segments(file, partial, segments > 1 ? segments : connections_, ca_bundle_, hooks_, s3_);
         offset = file.size;
     }
     if (offset > file.size) throw std::runtime_error("Partial file is larger than manifest size; remove " + partial.string());

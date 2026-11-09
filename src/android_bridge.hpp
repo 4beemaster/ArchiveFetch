@@ -150,7 +150,7 @@ Java_org_archivecatalog_app_NativeBridge_start(JNIEnv* environment, jclass type,
                 bool selected = !android_tree().empty();
                 std::cerr << "[download] Starting; destination=" << (selected ? "selected folder" : "app-specific storage")
                           << " expected_bytes=" << file.size << " overwrite=" << (overwrite ? "yes" : "no") << '\n';
-                Http http(app->config.ca_bundle, hooks, app->config.s3);
+                Http http(app->config.ca_bundle, hooks, app->config.s3, app->config.download_connections);
                 bool staged = false;
                 if (selected) {
                     auto target = download_target(directory, file);

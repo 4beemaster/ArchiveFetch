@@ -53,11 +53,14 @@ std::filesystem::path download_target(const std::filesystem::path& directory, co
 
 // A split download keeps parts 1..n-1 beside the .part file ("name.part.1", ...).
 inline constexpr int max_partial_segments = 16;
+// Archive.org's storage servers start refusing parallel requests from one client at around 10-12.
+inline constexpr int default_download_connections = 4;
+inline constexpr int max_download_connections = 8;
 std::filesystem::path partial_segment(const std::filesystem::path& partial, int index);
 
 class Http {
 public:
-    explicit Http(std::string ca_bundle = {}, TransferHooks hooks = {}, S3Credentials s3 = {});
+    explicit Http(std::string ca_bundle = {}, TransferHooks hooks = {}, S3Credentials s3 = {}, int connections = default_download_connections);
     Http(const Http&) = delete;
     Http& operator=(const Http&) = delete;
     ~Http();
@@ -68,6 +71,7 @@ private:
     std::string ca_bundle_;
     TransferHooks hooks_;
     S3Credentials s3_;
+    int connections_;
 };
 
 }

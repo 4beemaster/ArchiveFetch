@@ -259,6 +259,16 @@ public:
 private:
     struct Session { std::string token, cookie; };
     struct Response { long status = 0; std::string body, cookie; bool cookie_seen = false; };
+    struct Upload { std::ifstream input; std::function<void(std::uint64_t)> progress; std::uint64_t sent; };
+
+    static size_t read_upload(char* buffer, size_t size, size_t count, void* data) {
+        auto& upload = *static_cast<Upload*>(data);
+        upload.input.read(buffer, static_cast<std::streamsize>(size * count));
+        const auto read = static_cast<size_t>(upload.input.gcount());
+        upload.sent += read;
+        if (upload.progress) upload.progress(upload.sent);
+        return read;
+    }
 
     static void validate(ConsoleEntry& entry) {
         auto trim = [](std::string text) {
@@ -402,7 +412,8 @@ private:
         return size * count;
     }
 
-    ConsoleReply send(const ConsoleEntry& entry, const std::string& method, const std::string& path, const std::string& body, bool with_token, long timeout) {
+    ConsoleReply send(const ConsoleEntry& entry, const std::string& method, const std::string& path, const std::string& body, bool with_token, long timeout,
+        const std::filesystem::path* upload = nullptr, const std::function<void(std::uint64_t)>& progress = {}) {
         Session current;
         std::string device;
         {
@@ -427,7 +438,8 @@ private:
         if (with_token && !current.token.empty()) header("X-Archive-Session: " + current.token);
         if (!current.cookie.empty()) header("Cookie: " + std::string(console_cookie) + "=" + current.cookie);
         if (!device.empty()) header("X-ArchiveFetch-Device: " + device);
-        if (method == "POST") header("Content-Type: application/json");
+        if (method == "POST") header(upload ? "Content-Type: application/octet-stream" : "Content-Type: application/json");
+        if (upload) header("X-ArchiveFetch-Version: " ARCHIVEFETCH_VERSION);
         const auto url = "http://" + host + path;
         curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl.get(), CURLOPT_PROTOCOLS_STR, "http");
@@ -442,7 +454,15 @@ private:
         curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &response);
         curl_easy_setopt(curl.get(), CURLOPT_HEADERFUNCTION, read_header);
         curl_easy_setopt(curl.get(), CURLOPT_HEADERDATA, &response);
-        if (method == "POST") {
+        Upload streamed{{}, progress, 0};
+        if (method == "POST" && upload) {
+            streamed.input.open(*upload, std::ios::binary);
+            if (!streamed.input) return {500, Json({{"error", "The bundled payload cannot be read"}}).dump()};
+            curl_easy_setopt(curl.get(), CURLOPT_POST, 1L);
+            curl_easy_setopt(curl.get(), CURLOPT_READFUNCTION, read_upload);
+            curl_easy_setopt(curl.get(), CURLOPT_READDATA, &streamed);
+            curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(std::filesystem::file_size(*upload)));
+        } else if (method == "POST") {
             curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDS, body.c_str());
             curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(body.size()));
         }
@@ -470,7 +490,9 @@ private:
         const auto reply = send(entry, "GET", "/session", "", false, 4);
         const auto value = Json::parse(reply.body, nullptr, false);
         const auto version = value.is_object() && value.contains("version") && value.at("version").is_string() ? value.at("version").get<std::string>() : std::string();
-        Json result = {{"version", version}, {"older", !version.empty() && compare_versions(version, ARCHIVEFETCH_VERSION) < 0}};
+        Json result = {{"version", version}, {"older", !version.empty() && compare_versions(version, ARCHIVEFETCH_VERSION) < 0},
+            {"newer", !version.empty() && compare_versions(version, ARCHIVEFETCH_VERSION) > 0},
+            {"selfUpdate", value.is_object() && value.value("selfUpdate", false)}};
         if (reply.status == 200 && value.is_object() && value.contains("token")) {
             result["status"] = "online";
             std::lock_guard<std::mutex> guard(mutex_);
@@ -531,7 +553,7 @@ private:
         if (!online && !(response.status == 401 && value.value("login", false))) return nullptr;
         const auto version = value.at("version").get<std::string>();
         return {{"address", address}, {"port", port}, {"version", version.substr(0, 32)}, {"status", online ? "online" : "signin"},
-            {"older", compare_versions(version, ARCHIVEFETCH_VERSION) < 0}};
+            {"older", compare_versions(version, ARCHIVEFETCH_VERSION) < 0}, {"newer", compare_versions(version, ARCHIVEFETCH_VERSION) > 0}};
     }
 
     // The loader runs whatever ELF arrives on its port, so only the bundled payload is ever sent, and only to a saved console.
@@ -593,10 +615,41 @@ private:
                 for (const auto& field : changes.items()) installs_[entry.id][field.key()] = field.value();
             };
             try {
-                send_payload(resolve(entry.address), entry.loader, elf, [this, &entry](std::uint64_t sent) {
+                bool through_console = false;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    const auto known = status_.find(entry.id);
+                    through_console = known != status_.end() && known->second.value("selfUpdate", false);
+                }
+                const auto progress = [this, &entry](std::uint64_t sent) {
                     std::lock_guard<std::mutex> lock(mutex_);
                     installs_[entry.id]["sent"] = sent;
-                });
+                };
+                if (through_console) {
+                    // ArchiveFetch on the console hands the payload to its own loader, so the loader port never has to be reachable.
+                    update({{"route", "console"}});
+                    const auto upload = [&] {
+                        auto opened = session(entry);
+                        if (opened.status != 200) return opened;
+                        return send(entry, "POST", "/api/update", "", true, 600, &elf, progress);
+                    };
+                    auto reply = upload();
+                    // The console restarted and issued a new token: renew it once.
+                    if (reply.status == 403) reply = upload();
+                    const auto value = Json::parse(reply.body, nullptr, false);
+                    std::uint64_t sent = 0;
+                    { std::lock_guard<std::mutex> lock(mutex_); sent = installs_[entry.id].value("sent", 0ull); }
+                    // A connection lost after the whole payload went out is the old copy stopping, not a failure.
+                    const bool handed_over = reply.status == 504 && sent == std::filesystem::file_size(elf);
+                    if (reply.status != 200 && !handed_over) {
+                        const auto reason = value.is_object() ? value.value("error", "") : "";
+                        throw std::runtime_error(reply.status == 401 ? "Sign in to the console first, then update" :
+                            !reason.empty() ? reason : "The console did not accept the update (HTTP " + std::to_string(reply.status) + ")");
+                    }
+                } else {
+                    update({{"route", "loader"}});
+                    send_payload(resolve(entry.address), entry.loader, elf, progress);
+                }
                 update({{"stage", "starting"}});
                 // The running ArchiveFetch hands over to the new one; it is done once /session reports the new version.
                 const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(install_wait_seconds);

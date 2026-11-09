@@ -96,6 +96,8 @@ $('settings-button').addEventListener('click', () => {
   $('location-preference').value = settings.locationPreference || 'auto';
   $('destination-input').value = settings.destination; $('output-input').value = settings.output;
   $('automatic').checked = settings.automatic; $('remember').checked = settings.remember;
+  $('connections').replaceChildren(...Array.from({ length: settings.maxConnections || 1 }, (_, index) => node('option', String(index + 1))));
+  $('connections').value = String(settings.connections || 1);
   $('extract-settings').hidden = !settings.extractSupported;
   $('extract-archives').checked = !!settings.extractArchives; $('delete-extracted').checked = !!settings.deleteExtracted;
   $('excluded-extensions').value = settings.excludedExtensions ?? '';
@@ -121,7 +123,7 @@ $('settings-form').addEventListener('submit', async event => {
   try {
     const result = await command('settings', { destination: $('destination-input').value, output: $('output-input').value,
       ...(!android && state.snapshot.settings.locationsSupported ? { defaultLocation: state.snapshot.settings.defaultLocation, locationPreference: $('location-preference').value } : {}),
-      automatic: $('automatic').checked, remember: $('remember').checked,
+      automatic: $('automatic').checked, remember: $('remember').checked, connections: Number($('connections').value),
       ...(state.snapshot.settings.extractSupported ? { extractArchives: $('extract-archives').checked, deleteExtracted: $('delete-extracted').checked } : {}),
       excludedExtensions: $('excluded-extensions').value,
       access: $('access-key').value, secret: $('secret-key').value });

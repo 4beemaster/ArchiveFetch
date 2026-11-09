@@ -198,11 +198,18 @@ function renderQueue() {
     badge.className = `badge ${entry.status === 'Failed' ? 'failed' : 'warn'}`;
     row.querySelector('.numbers').textContent = staged !== null
       ? `${Math.floor(staged * 100)}%${entry.stageTotal ? ` · ${bytes(entry.stageDone)} / ${bytes(entry.stageTotal)}` : ''}`
-      : `${bytes(entry.received)} / ${bytes(entry.size)}`;
+      : `${bytes(entry.received)} / ${bytes(entry.size)}${transferSpeed(entry)}`;
     row.querySelector(':scope > button').disabled = state.pending || entry.removing;
   });
   $('queue-empty').hidden = queue.length !== 0;
   $('queue-summary').textContent = `${queue.length} ${queue.length === 1 ? 'file' : 'files'}`;
+}
+// " · 12.3 MB/s · 4 min left" while a file is transferring, otherwise empty.
+function transferSpeed(entry) {
+  if (!entry.rate || !entry.status.startsWith('Transferring')) return '';
+  const seconds = Math.ceil(Math.max(0, entry.size - entry.received) / entry.rate), minutes = Math.ceil(seconds / 60);
+  const left = seconds < 60 ? `${seconds} s` : minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+  return ` · ${bytes(entry.rate)}/s · ${left} left`;
 }
 // Fraction done of the step after the transfer (joining parts, verifying, extracting), or null outside one.
 function queueStage(entry) {

@@ -329,7 +329,7 @@ public:
             auto value = file_json(entry.file);
             value.update({{"id", entry.id}, {"status", queue_status_name(entry.status)}, {"received", entry.received},
                 {"detail", entry.detail}, {"removing", entry.removal_requested}, {"destination", entry.destination.u8string()},
-                {"stage", entry.stage}, {"stageDone", entry.stage_done}, {"stageTotal", entry.stage_total}});
+                {"stage", entry.stage}, {"stageDone", entry.stage_done}, {"stageTotal", entry.stage_total}, {"rate", entry.rate}});
             result["queue"].push_back(value);
         }
         return result;
@@ -345,6 +345,7 @@ public:
             {"ca", config.ca_bundle}, {"automatic", config.automatically_start_downloads},
             {"extractSupported", static_cast<bool>(extract)}, {"extractArchives", config.extract_archives},
             {"deleteExtracted", config.delete_extracted_archives},
+            {"connections", config.download_connections}, {"maxConnections", max_download_connections},
             {"excludedExtensions", format_extension_list(config.excluded_extensions)},
             {"authenticated", !config.s3.access_key.empty() && !config.s3.secret_key.empty()}, {"remember", remember},
             {"keysProtected", CredentialStore::protected_storage()}};
@@ -773,9 +774,9 @@ public:
 #else
         if (!download_state_writable) throw std::runtime_error("Repair saved download locations before downloading");
         const auto transfer = download;
-        model.start_downloads(config, [this, transfer, ca = config.ca_bundle, keys = config.s3](const File& file, const std::filesystem::path& directory, bool overwrite, const TransferHooks& hooks) {
+        model.start_downloads(config, [this, transfer, ca = config.ca_bundle, keys = config.s3, connections = config.download_connections](const File& file, const std::filesystem::path& directory, bool overwrite, const TransferHooks& hooks) {
             if (transfer) transfer(file, directory, overwrite, hooks);
-            else { Http http(ca, hooks, keys); http.download(file, directory, overwrite); }
+            else { Http http(ca, hooks, keys, connections); http.download(file, directory, overwrite); }
             record_download(file, directory);
             extract_after_download(file, directory, hooks);
         }, retry_id);
@@ -1175,6 +1176,12 @@ public:
         next.automatically_start_downloads = value.at("automatic").get<bool>();
         next.extract_archives = value.value("extractArchives", config.extract_archives);
         next.delete_extracted_archives = value.value("deleteExtracted", config.delete_extracted_archives);
+        if (value.contains("connections")) {
+            const auto& connections = value.at("connections");
+            if (!connections.is_number_integer() || connections.get<int>() < 1 || connections.get<int>() > max_download_connections)
+                throw std::runtime_error("Choose 1 to " + std::to_string(max_download_connections) + " connections per download");
+            next.download_connections = connections.get<int>();
+        }
         if (value.contains("excludedExtensions")) next.excluded_extensions = parse_extension_list(value.at("excludedExtensions").get<std::string>());
         if (next.download_dir.empty() || next.output_dir.empty()) throw std::runtime_error("Choose download and export directories");
         auto access = value.value("access", "");
@@ -1211,6 +1218,7 @@ public:
         property("ca_bundle", next.ca_bundle); property("automatically_start_downloads", next.automatically_start_downloads ? "true" : "false");
         property("extract_archives", next.extract_archives ? "true" : "false");
         property("delete_extracted_archives", next.delete_extracted_archives ? "true" : "false");
+        property("download_connections", std::to_string(next.download_connections));
         property("excluded_extensions", format_extension_list(next.excluded_extensions));
         property("follow_parts", next.follow_parts ? "true" : "false"); property("debug_window", next.debug_window ? "true" : "false");
         for (const auto& source : model.snapshot().sources) {

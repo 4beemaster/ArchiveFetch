@@ -260,7 +260,7 @@ std::unique_ptr<httplib::Server> make_server() {
     http->set_read_timeout(3, 0);
     http->set_write_timeout(10, 0);
     http->set_keep_alive_timeout(2);
-    http->set_payload_max_length(1024 * 1024);
+    http->set_payload_max_length(update_body_limit);
     configure_routes(*http);
     return http;
 }

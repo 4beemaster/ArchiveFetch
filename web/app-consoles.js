@@ -5,6 +5,7 @@ let consolePolling = false;
 let editingConsole = '';
 let targetsKey = '';
 let payloadAvailable = false;
+let appVersion = '';
 const consoleStatusText = { online: 'Online', signin: 'Needs sign-in', offline: 'Offline', refused: 'Refused the connection', checking: 'Checking' };
 function consoleState(entry) { return entry.status === 'online' && entry.older ? 'older' : entry.status; }
 function installText(install) {
@@ -16,7 +17,7 @@ function installText(install) {
 function consoleDetail(entry) {
   const parts = [entry.port === 8890 ? entry.address : `${entry.address}:${entry.port}`,
     entry.status === 'refused' && entry.detail ? entry.detail : consoleStatusText[entry.status] || entry.status];
-  if (entry.version) parts.push(entry.older ? `ArchiveFetch ${entry.version}, older than this app` : `ArchiveFetch ${entry.version}`);
+  if (entry.version) parts.push(entry.older ? `ArchiveFetch ${entry.version}, older than this app` : entry.newer ? `ArchiveFetch ${entry.version}, newer than this app` : `ArchiveFetch ${entry.version}`);
   if (entry.paired) parts.push('Paired');
   if (entry.install) parts.push(installText(entry.install));
   return parts.join(' · ');
@@ -28,18 +29,55 @@ function installLabel(entry) {
   return entry.status === 'offline' || entry.status === 'refused' ? 'Install ArchiveFetch' : '';
 }
 async function installConsole(entry) {
-  const message = `This app sends its ArchiveFetch payload to ${entry.address} on port ${entry.loader}, the console's ELF loader. Start the loader on the console first; a running ArchiveFetch hands over to the new one.`;
+  const message = entry.selfUpdate && entry.status !== 'offline' && entry.status !== 'refused'
+    ? `This app sends its ArchiveFetch payload to ArchiveFetch on ${entry.name}, which starts it with the console's own ELF loader. The loader must be running on the console, but its port does not need to be reachable from here.`
+    : `This app sends its ArchiveFetch payload to ${entry.address} on port ${entry.loader}, the console's ELF loader. Start the loader on the console first; a running ArchiveFetch hands over to the new one.`;
   if (!await confirmAction(`${installLabel(entry)} on ${entry.name}?`, message)) return;
   try {
     let result = await localRequest('/api/consoles', { action: 'install', id: entry.id });
     payloadAvailable = !!result.payload; consoleList = result.consoles; renderTargets();
-    while ($('targets-dialog').open && consoleList.find(saved => saved.id === entry.id)?.install?.running) {
+    // Kept up while the dialog is closed too, so the banner shows the progress.
+    while (consoleList.find(saved => saved.id === entry.id)?.install?.running) {
       await new Promise(resolve => setTimeout(resolve, 1000));
       result = await localRequest('/api/consoles', {});
       consoleList = result.consoles; renderTargets();
     }
-  } catch (error) { consoleError(error.message); }
+  } catch (error) { if ($('targets-dialog').open) consoleError(error.message); else fail(error.message); }
 }
+// One banner for a console whose ArchiveFetch differs from this app: the console being controlled, or on This device the first saved one.
+function bannerKey(entry) { return `archivefetch-banner:${entry.id}:${entry.version}:${appVersion}`; }
+function bannerConsole() {
+  const differs = entry => entry.install?.running || (entry.version && (entry.older || entry.newer) &&
+    (() => { try { return localStorage.getItem(bannerKey(entry)) !== 'dismissed'; } catch { return true; } })());
+  if (consoleTarget) return consoleList.find(entry => entry.id === consoleTarget && differs(entry)) || null;
+  return consoleList.find(differs) || null;
+}
+function renderUpdateBanner() {
+  const entry = bannerConsole();
+  $('update-banner').hidden = !entry;
+  if (!entry) return;
+  const install = entry.install;
+  const newer = !install?.running && entry.newer;
+  let text, action = '';
+  if (install?.running) text = `${entry.name}: ${installText(install)}`;
+  // This app only carries its own version, so it never puts an older ArchiveFetch on the console.
+  else if (newer) text = `${entry.name} runs ArchiveFetch ${entry.version}, which is newer than this app (${appVersion}). Install ArchiveFetch ${entry.version} on this device to match.`;
+  else {
+    text = `${entry.name} runs ArchiveFetch ${entry.version}; this app has ${appVersion}.`;
+    if (install?.stage === 'failed') text += ` ${installText(install)}`;
+    if (payloadAvailable) action = 'Update ArchiveFetch';
+  }
+  $('update-banner').className = newer ? 'newer' : '';
+  $('update-banner-text').textContent = text;
+  $('update-banner-action').textContent = action; $('update-banner-action').hidden = !action;
+  $('update-banner-dismiss').hidden = !!install?.running;
+}
+$('update-banner-action').addEventListener('click', () => { const entry = bannerConsole(); if (entry) installConsole(entry); });
+$('update-banner-dismiss').addEventListener('click', () => {
+  const entry = bannerConsole();
+  if (entry) try { localStorage.setItem(bannerKey(entry), 'dismissed'); } catch {}
+  renderUpdateBanner();
+});
 function chooseTarget(id) {
   try { if (id) localStorage.setItem('archivefetch-target', id); else localStorage.removeItem('archivefetch-target'); } catch {}
   location.reload();
@@ -53,6 +91,7 @@ function showTarget() {
   $('target-button').title = label; $('target-button').setAttribute('aria-label', label);
   if (saved) $('login-title').textContent = `Sign in to ${saved.name}`;
   $('merge-button').hidden = !consolesSupported || !consoleList.length;
+  renderUpdateBanner();
 }
 function renderTargets() {
   showTarget();
@@ -80,7 +119,7 @@ function renderTargets() {
 }
 async function loadConsoles(refresh = false) {
   const result = await localRequest('/api/consoles', { refresh });
-  payloadAvailable = !!result.payload;
+  payloadAvailable = !!result.payload; appVersion = result.appVersion || appVersion;
   consoleList = result.consoles; renderTargets(); renderScan(result.scan);
 }
 let scanKey = '';
@@ -99,7 +138,7 @@ function renderScan(scan) {
     const state = entry.status === 'online' && entry.older ? 'older' : entry.status;
     const dot = node('i', undefined, `target-dot ${state}`); dot.setAttribute('aria-hidden', 'true');
     const text = node('span', undefined, 'target-text target-choose');
-    text.append(node('strong', entry.address), node('small', `${consoleStatusText[entry.status] || entry.status} \u00b7 ArchiveFetch ${entry.version}${entry.older ? ', older than this app' : ''}`));
+    text.append(node('strong', entry.address), node('small', `${consoleStatusText[entry.status] || entry.status} \u00b7 ArchiveFetch ${entry.version}${entry.older ? ', older than this app' : entry.newer ? ', newer than this app' : ''}`));
     const add = node('button', entry.saved ? 'Saved' : 'Add'); add.type = 'button'; add.disabled = !!entry.saved;
     add.addEventListener('click', () => {
       resetConsoleForm();

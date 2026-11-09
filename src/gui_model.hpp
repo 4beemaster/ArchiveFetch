@@ -23,6 +23,8 @@ struct QueueEntry {
     std::filesystem::path destination;
     std::string stage;
     std::uint64_t stage_done = 0, stage_total = 0;
+    // Bytes per second while transferring, 0 otherwise.
+    std::uint64_t rate = 0;
 };
 
 struct SourceEntry {

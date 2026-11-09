@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 
 namespace httplib {
@@ -9,6 +10,10 @@ struct Response;
 }
 
 namespace archivefetch_diag {
+
+// The largest request body: a PS5 payload sent to /api/update. Every other route is limited to small_body_limit.
+inline constexpr std::size_t update_body_limit = 64u << 20;
+inline constexpr std::size_t small_body_limit = 1u << 20;
 
 // Loads ArchiveFetch data from data_root; returns false (and API routes answer 503) if it cannot start.
 bool api_init(const char* data_root);
