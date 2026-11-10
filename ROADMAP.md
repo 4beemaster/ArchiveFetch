@@ -15,7 +15,7 @@ Working plan; versions and details can still change.
 
 ## Next
 
-- **0.8.0-beta.2** (in development): builds on beta.1's manual GitHub check and beta-build opt-in with explicit download, SHA256 verification and installation. Updates are staged privately with persistent status; corrupt, incomplete or changed files are not installed. Windows and Android use their system installers; PS5 hands the verified ELF to its local loader, then synchronizes an existing Payload Manager copy without changing its filename, slot or boot list. No automatic background checks or unattended installation. Full Windows, Android-emulator and real-PS5 GitHub-to-installed upgrade testing is required before calling 0.8.0 ready; development stops for review if beta.4 is reached first. Android release signing remains separate future work.
+- **0.8.0-beta.3** (acceptance testing): beta.2 introduced explicit GitHub download, SHA256 verification and installation; beta.3 provides a genuinely newer published build for end-to-end upgrades from beta.2. Updates are staged privately with persistent status; corrupt, incomplete or changed files are not installed. Windows and Android use their system installers; PS5 hands the verified ELF to its local loader, then synchronizes an existing Payload Manager copy without changing its filename, slot or boot list. No automatic background checks or unattended installation. Full Windows, Android-emulator and real-PS5 GitHub-to-installed upgrade testing is required before calling 0.8.0 ready; development stops for review if beta.4 is reached first. Android release signing remains separate future work.
 
 ## 1.0.0
 
