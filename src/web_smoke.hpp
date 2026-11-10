@@ -388,6 +388,82 @@ void web_smoke(httplib::Server& server, WebApplication& application, int port, c
     require(result && result->status == 200, "Settings saved");
     result = client.Get("/api/state", headers);
     require(result && result->status == 200 && result->body.find("test-secret") == std::string::npos && result->body.find("test-access") == std::string::npos, "Credentials never returned");
+    {
+        require(client.Get("/")->body.find("id=\"check-updates\"") != std::string::npos, "Settings includes manual update checks");
+        std::atomic<int> checks{0};
+        const auto page = "https://github.com/4beemaster/ArchiveFetch/releases/tag/v999.0.0";
+        const auto download = "https://github.com/4beemaster/ArchiveFetch/releases/download/v999.0.0/ArchiveFetch-999.0.0-windows-x64-setup.exe";
+        const Json feed = Json::array({{{"draft", false}, {"prerelease", true}, {"tag_name", "v999.0.0"},
+            {"html_url", page}, {"body", "<script>plain release notes</script>"},
+            {"assets", Json::array({{{"name", "ArchiveFetch-999.0.0-windows-x64-setup.exe"}, {"browser_download_url", download}},
+                {{"name", "SHA256SUMS-999.0.0.txt"}, {"browser_download_url",
+                    "https://github.com/4beemaster/ArchiveFetch/releases/download/v999.0.0/SHA256SUMS-999.0.0.txt"}}})}}});
+        application.updates.fetch = [&, feed](const std::string& url, std::size_t) {
+            ++checks;
+            require(url == "https://api.github.com/repos/4beemaster/ArchiveFetch/releases?per_page=20&page=1",
+                "Update checks cannot redirect to a supplied URL or transmit saved keys");
+            return feed.dump();
+        };
+        std::string opened;
+        application.open_update = [&](const std::string& url) { opened = url; };
+        result = client.Post("/api/command", "{\"action\":\"checkUpdates\"}", "application/json");
+        require(result && result->status == 403 && checks == 0, "Unauthenticated update checks do not contact GitHub");
+        result = client.Post("/api/command", "{\"action\":\"installUpdate\",\"version\":\"999.0.0\"}", "application/json");
+        require(result && result->status == 403, "Unauthenticated requests cannot install an app update");
+        result = send({{"action", "installUpdate"}, {"version", "999.0.0"}, {"path", "arbitrary.exe"}});
+        require(result && result->status == 400, "A client path cannot bypass release download and verification");
+        result = send({{"action", "openUpdate"}, {"kind", "release"}, {"version", "999.0.0"}});
+        require(result && result->status == 400 && opened.empty(), "Opening a release requires a successful check");
+        result = send({{"action", "checkUpdates"}, {"includeBeta", false}, {"url", "https://example.invalid"}});
+        require(result && result->status == 200 && checks == 1, "Authenticated manual update check uses fixed endpoint");
+        const auto updates = Json::parse(result->body);
+        require(updates.at("currentVersion") == ARCHIVEFETCH_VERSION && updates.at("latestVersion") == "999.0.0" &&
+            updates.at("updateAvailable") == true && updates.at("release").at("url") == page, "Update API returns release details");
+        result = send({{"action", "openUpdate"}, {"kind", "windows"}, {"version", "999.0.0"}, {"url", "https://example.invalid"}});
+        require(result && result->status == 200 && opened == download, "Native browser opens only the checked platform download");
+        opened.clear();
+        result = send({{"action", "openUpdate"}, {"kind", "release"}, {"version", "0.7.3"}});
+        require(result && result->status == 400 && opened.empty(), "Stale release links cannot open a different checked release");
+        result = send({{"action", "openUpdate"}, {"kind", "https://example.invalid"}, {"version", "999.0.0"}});
+        require(result && result->status == 400 && opened.empty(), "Arbitrary external URLs rejected");
+        application.release_update.download = [](const std::string& url, const std::filesystem::path& path,
+                std::uint64_t, const TransferHooks&) {
+            const std::string text = url.find("SHA256SUMS") != std::string::npos
+                ? "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  ArchiveFetch-999.0.0-windows-x64-setup.exe\n"
+                : "abc";
+            std::ofstream output(path, std::ios::binary);
+            output << text;
+            return static_cast<std::uint64_t>(text.size());
+        };
+        int installations = 0;
+        application.release_update.installer = [&](const std::filesystem::path& path, const std::string& version) {
+            require(path == application.root / "updates" / "ArchiveFetch-999.0.0-windows-x64-setup.exe" && version == "999.0.0",
+                "Install API hands off only the verified staged asset");
+            ++installations;
+        };
+        result = send({{"action", "prepareUpdate"}, {"version", "999.0.0"}, {"url", "https://example.invalid"}});
+        require(result && result->status == 200, "Authenticated update download uses checked release assets");
+        for (int attempt = 0; attempt < 100; ++attempt) {
+            result = send({{"action", "updateStatus"}});
+            if (!Json::parse(result->body).at("running").get<bool>()) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        require(result && Json::parse(result->body).at("phase") == "ready", "Update API reports verification completion");
+        result = send({{"action", "installUpdate"}, {"version", "999.0.0"}, {"path", "arbitrary.exe"}});
+        require(result && result->status == 200 && installations == 1, "Verified update API launches exactly one checked installer");
+        result = send({{"action", "installUpdate"}, {"version", "999.0.0"}});
+        require(result && result->status == 400 && installations == 1, "An in-progress installer cannot be launched twice");
+        application.release_update.installer = {};
+        application.release_update.download = {};
+        application.updates.fetch = [](const std::string&, std::size_t) -> std::string { throw std::runtime_error("GitHub HTTP 403 rate limit"); };
+        result = send({{"action", "checkUpdates"}});
+        require(result && result->status == 400 && Json::parse(result->body).at("error") == "GitHub HTTP 403 rate limit",
+            "Update failures are errors, never up-to-date results");
+        result = send({{"action", "openUpdate"}, {"kind", "release"}, {"version", "999.0.0"}});
+        require(result && result->status == 400 && opened.empty(), "Failed checks invalidate stale download links");
+        application.updates.fetch = {};
+        application.open_update = {};
+    }
     result = client.Get("/api/library", headers);
     require(result && result->status == 200 && Json::parse(result->body).at("files").size() == 2, "Live model catalog returned");
     {

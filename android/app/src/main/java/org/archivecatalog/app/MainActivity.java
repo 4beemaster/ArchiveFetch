@@ -153,6 +153,17 @@ public final class MainActivity extends Activity {
                 current.worker.execute(() -> {
                     try {
                         JSONObject result = new JSONObject(NativeBridge.request(value.getString("path"), data == null ? "{}" : data.toString(), value.optString("token")));
+                        if (result.has("installUpdate")) {
+                            if (!"/api/command".equals(value.getString("path")) || !"installUpdate".equals(action) ||
+                                !result.optBoolean("ok"))
+                                throw new IllegalStateException("Unexpected native update installation response");
+                            JSONObject update = result.getJSONObject("installUpdate");
+                            File verified = VerifiedUpdateInstaller.verify(this, update);
+                            result.remove("installUpdate");
+                            runOnUiThread(() -> installVerifiedUpdate(current, reply, id, result, verified,
+                                update.optString("version"), value.optString("token")));
+                            return;
+                        }
                         if (result.optBoolean("openS3Keys")) {
                             result.remove("openS3Keys");
                             runOnUiThread(() -> {
@@ -161,6 +172,19 @@ public final class MainActivity extends Activity {
                                     respond(reply, id, result, null);
                                 } catch (android.content.ActivityNotFoundException failure) {
                                     respond(reply, id, null, "No browser is available to open Internet Archive S3 keys");
+                                }
+                            });
+                            return;
+                        }
+                        if (result.has("openUpdate")) {
+                            Uri uri = updateLink(result.getString("openUpdate"));
+                            result.remove("openUpdate");
+                            runOnUiThread(() -> {
+                                try {
+                                    startActivity(new Intent(Intent.ACTION_VIEW, uri));
+                                    respond(reply, id, result, null);
+                                } catch (android.content.ActivityNotFoundException failure) {
+                                    respond(reply, id, null, "No browser is available to open the ArchiveFetch release");
                                 }
                             });
                             return;
@@ -177,6 +201,57 @@ public final class MainActivity extends Activity {
         content.addView(web, new FrameLayout.LayoutParams(-1, -1));
         if (Build.VERSION.SDK_INT >= 33)
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, this::handleBack);
+    }
+    static Uri updateLink(String url) {
+        Uri uri = Uri.parse(url);
+        String path = uri.getEncodedPath();
+        String version = "v[0-9]+\\.[0-9]+\\.[0-9]+(?:-beta\\.[1-9][0-9]*)?";
+        if (!"https".equals(uri.getScheme()) || !"github.com".equals(uri.getHost()) || uri.getPort() != -1 ||
+            uri.getUserInfo() != null || uri.getQuery() != null || uri.getFragment() != null || path == null ||
+            path.contains("..") || !path.matches("/4beemaster/ArchiveFetch/releases/(?:tag/" + version +
+                "|download/" + version + "/[A-Za-z0-9.-]+)"))
+            throw new IllegalArgumentException("Only official ArchiveFetch release links can be opened");
+        return uri;
+    }
+    private void installVerifiedUpdate(CatalogService current, JavaScriptReplyProxy reply, long id,
+            JSONObject result, File verified, String version, String token) {
+        if (!resumed || isFinishing() || isDestroyed()) {
+            respond(reply, id, null, "Open ArchiveFetch and retry Install update");
+            return;
+        }
+        if (!getPackageManager().canRequestPackageInstalls()) {
+            respond(reply, id, null, "Allow ArchiveFetch to install updates in Android settings, then retry Install update");
+            new AlertDialog.Builder(this).setTitle("Allow ArchiveFetch updates")
+                .setMessage("Android requires permission to open this verified APK in the package installer. Allow from this source, return here, then tap Install update again.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Open settings", (dialog, which) -> {
+                    try {
+                        startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                            Uri.parse("package:" + getPackageName())));
+                    } catch (android.content.ActivityNotFoundException | SecurityException failure) {
+                        showError("Cannot open Android install permission settings: " + failure.getMessage());
+                    }
+                }).show();
+            return;
+        }
+        try {
+            startActivity(VerifiedUpdateInstaller.installerIntent(this, verified));
+        } catch (android.content.ActivityNotFoundException | SecurityException | IllegalArgumentException failure) {
+            respond(reply, id, null, "Cannot open the Android package installer: " + failure.getMessage());
+            return;
+        }
+        current.worker.execute(() -> {
+            try {
+                JSONObject started = new JSONObject(NativeBridge.request("/api/command",
+                    new JSONObject().put("action", "updateInstallStarted").put("version", version).toString(), token));
+                if (started.has("error") || !"installing".equals(started.optString("phase")) ||
+                    !version.equals(started.optString("version")))
+                    throw new IllegalStateException(started.optString("error", "Native update state was not acknowledged"));
+                respond(reply, id, result, null);
+            } catch (Exception failure) {
+                respond(reply, id, null, "Android installer opened, but update state could not be saved: " + failure.getMessage());
+            }
+        });
     }
     private static boolean trusted(Uri uri) { return "https".equals(uri.getScheme()) && "appassets.androidplatform.net".equals(uri.getHost()) && uri.getPort() == -1 && uri.getPath() != null && uri.getPath().startsWith("/assets/"); }
     private void respond(JavaScriptReplyProxy reply, long id, JSONObject result, String failure) {

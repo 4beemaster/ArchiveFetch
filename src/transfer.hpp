@@ -41,7 +41,10 @@ struct S3Credentials {
 };
 
 bool s3_destination_allowed(const std::string& url);
-std::string request_error_message(const std::string& detail, long status, bool credentials_provided);
+std::string release_page_url(int page);
+bool release_asset_url_allowed(const std::string& url, bool redirect = false);
+std::string sha256_file(const std::filesystem::path& path, const TransferHooks& hooks = {});
+std::string request_error_message(const std::string& detail, long status, bool credentials_provided, bool archive_request = true);
 
 class OperationCancelled : public std::runtime_error {
 public:
@@ -65,9 +68,13 @@ public:
     Http& operator=(const Http&) = delete;
     ~Http();
     std::string get(const std::string& url, std::size_t limit = 32 * 1024 * 1024) const;
+    std::string get_release_page(int page, std::size_t limit = 2 * 1024 * 1024) const;
+    std::uint64_t download_release_asset(const std::string& url, const std::filesystem::path& path,
+        std::uint64_t limit) const;
     void download(const File& file, const std::filesystem::path& directory, bool overwrite = false) const;
 
 private:
+    std::string get_metadata(const std::string& url, std::size_t limit, bool release_request) const;
     std::string ca_bundle_;
     TransferHooks hooks_;
     S3Credentials s3_;

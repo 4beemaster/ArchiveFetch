@@ -1,6 +1,6 @@
 # ArchiveFetch
 
-Current version: **0.7.3**, the same for the Windows, Android and PS5 apps. It lives in the `VERSION` file, which every build reads; the apps show it next to the ArchiveFetch name. Android's version code is derived from it (0.6.0-beta.1 = 6001, the 0.6.0 release = 6099) so each build installs over the earlier ones. Versions below 1.0 indicate an evolving, not-yet-stable project.
+Current development version: **0.8.0-beta.2**, the same for the Windows, Android and PS5 apps. It lives in the `VERSION` file, which every build reads; the apps show it next to the ArchiveFetch name. Android's version code is derived from it (0.6.0-beta.1 = 6001, the 0.6.0 release = 6099) so each build installs over the earlier ones. Versions below 1.0 indicate an evolving, not-yet-stable project.
 
 A Windows/Android HTML interface, a PS5 app served to the console browser and local network, desktop command-line client, and legacy headless PS5 ELF payload for combining Internet Archive file manifests and downloading explicitly selected files. The interfaces reuse the native catalog and download worker model.
 
@@ -19,6 +19,7 @@ Use downloads only for content you are authorized to download. The client suppor
 - Saves files directly in the selected download directory using only the filename, without collection or source subfolders. The remote URL and catalog retain the full original path.
 - Resumes `.part` files using HTTP ranges, checks available space, then verifies size and the manifest's SHA-1 (or MD5 fallback) before renaming. Verified existing files are skipped; conflicting existing files are never overwritten. An integrity failure discards the partial file; an interrupted transfer keeps it for the next run. A server that does not honor range requests causes an error rather than appending a full response.
 - Requires HTTPS certificate verification. Metadata requests have time, size, and redirect limits and up to two retries for transient connection errors or HTTP 408/429/500/502/503/504. Retries back off and honor `Retry-After` up to 60 seconds; longer requested delays are reported as failures for a later run. Certificate, authorization, parsing, and size-limit failures are not retried. Downloads have connection and low-speed timeouts but are not automatically retried; relaunch to resume. Transfers are sequential.
+- **Settings > ArchiveFetch updates > Check for updates** manually checks the public GitHub releases for this app, even while the Windows or Android app controls a console. It shows installed/latest versions, distinguishes an available update from a development build newer than the published release, and displays release notes as plain text. Published 0.x releases are included even when GitHub labels them pre-releases; **Include beta builds** also includes `-beta.N` tags. Drafts and unrecognized tags are ignored; versions compare numerically, not by release date. **Download and verify update** stages the matching installer, APK or ELF privately and verifies its SHA256 against the official checksum manifest and GitHub's asset digest when available. Only then can **Install verified update** start the system installer on Windows/Android or hand the ELF to the PS5's local loader. The PS5 successor also synchronizes an existing Payload Manager copy, preserving its filename, slot and boot list; synchronization errors remain visible with an explicit retry. Existing downloads/scans must finish before an app update starts. Progress and installation status survive app restarts, and staged bytes are verified again before installation. Android may require permission to install apps from ArchiveFetch and a system confirmation. Browser download/release/checksum links remain available. No automatic background checks or unattended installation. Checks use verified HTTPS without Archive.org keys or a GitHub token. Requests have a 20-second cancellation deadline, at most five pages of 20 releases and 2 MiB per page; an incomplete list is an error, not "up to date". Asset transfers have a ten-minute deadline, bounded size and HTTPS-only redirects to GitHub's asset hosts. Checksums detect corruption; they do not protect against a compromised publisher or replace platform signing.
 
 Archive.org's legacy MD5/SHA-1 values detect accidental corruption only. They are not modern authenticity checks and do not establish that an uploader or file is trustworthy. Static analyzers may flag these required compatibility fields; they are not used for credentials, signatures, or security decisions. Files without either checksum are listed but cannot be queued for download.
 
@@ -34,6 +35,8 @@ ctest --test-dir build --output-on-failure
 ```
 
 The command above generates metadata lists only. Add `--single-item` to skip related-part discovery. On Linux, use `./build/archive_catalog` instead. For offline parser-only builds use `-DBUILD_APP=OFF`; libxml2 is still required. Use `-DBUILD_WEB=OFF` to build only the CLI and core tests. HTML builds fetch SHA-256-pinned cpp-httplib 0.18.3, nlohmann/json 3.11.3, Karla, Font Awesome Free and qrcode-generator assets and, on Windows, webview 0.12.0 and WebView2 SDK 1.0.1150.38. The SDL2/Dear ImGui desktop app was retired in 0.6.0; the HTML interface replaces it. Downloads happen at build time, never at application startup. If your build machine uses a private certificate authority, configure CMake's trusted CA bundle (`CMAKE_TLS_CAINFO`) rather than disabling TLS verification.
+
+With the default HTML build, `update_check_tests --live` is an optional network test of the production release checker against GitHub. It uses an explicit 0.7.2 test baseline to exercise a genuinely newer published release and validates its installer/checksum links. It does not change the app's version, install anything, or simulate a published beta. Ordinary CTest runs stay offline for this suite.
 
 ## Windows HTML Interface
 
@@ -79,7 +82,7 @@ Microsoft Edge WebView2 Runtime must be installed. Setup checks for it and, if m
 To build setup from a validated portable package (EXE, runtime DLLs, web assets, licenses and matching `payload` folder), install Inno Setup 6 or 7 and run:
 
 ```powershell
-.\packaging\windows\build-installer.ps1 -PackageDir .\build-windows-portable\ArchiveFetch-0.7.3-windows-x64
+.\packaging\windows\build-installer.ps1 -PackageDir .\build-windows-portable\ArchiveFetch-0.8.0-beta.2-windows-x64
 ```
 
 The script requires the bundled payload version and hash to match the current PS5 build. Privacy-scan all staged files and the resulting installer before distributing either. The stable setup application ID keeps beta/release upgrades in the same per-user installation.
@@ -168,7 +171,7 @@ Starting with 0.7.3, an app update also replaces the console's existing ArchiveF
 
 ## PS5 App
 
-Version **0.7.3**. ArchiveFetch runs on a jailbroken PS5 as a payload ELF and serves its web interface on port **8890**, to the console's own browser and to phones or computers on the same network. Verified on firmware 13.60.
+Version **0.8.0-beta.2**. ArchiveFetch runs on a jailbroken PS5 as a payload ELF and serves its web interface on port **8890**, to the console's own browser and to phones or computers on the same network. Verified on firmware 13.60.
 
 ### Install and open
 
@@ -245,8 +248,8 @@ Exit codes: 0 success, 1 configuration/setup error, 2 incomplete scan, 3 one or 
 
 ## Testing
 
-- **Windows** (`ctest --test-dir build`, seven suites): catalog parsing and import/export, hidden file types, path safety, checksums, configuration, the queue and partial downloads, S3 key handling, the DPAPI credential store (using temporary files, never real secrets), and the web API smoke test (`archive_catalog_web --smoke-test`), which also covers console control, pairing, the network scan, Install/Update, boot-copy warnings/retries and Merge against stand-in consoles on this computer. `payload_manager_tests` uses a loopback stand-in to test Payload Manager 0.5/0.6 replacement, filename/slot preservation, refused unsafe destinations and upload failures without touching a console or boot list.
-- **Android** (instrumentation tests on an emulator): the native backend, settings and credential storage, downloads and the folder picker, the WebView interface, console control and pairing, the bundled PS5 build, and live HTTPS to archive.org.
+- **Windows** (`ctest --test-dir build`, nine suites): catalog parsing and import/export, hidden file types, path safety, checksums, configuration, the queue and partial downloads, S3 key handling, the DPAPI credential store (using temporary files, never real secrets), and the web API smoke test (`archive_catalog_web --smoke-test`), which also covers console control, pairing, the network scan, Install/Update, boot-copy warnings/retries and Merge against stand-in consoles on this computer. `payload_manager_tests` uses a loopback stand-in to test Payload Manager 0.5/0.6 replacement, filename/slot preservation, refused unsafe destinations and upload failures without touching a console or boot list. Release-update tests cover channel selection, constrained URLs, strict SHA256 manifests, corruption and post-verification tampering, installer failures, persisted completion and Windows installer handoff. `update_check_tests --live-download` explicitly downloads and verifies a real published ELF without executing it.
+- **Android** (instrumentation tests on an emulator): the native backend, settings and credential storage, downloads and the folder picker, the WebView interface, console control and pairing, the bundled PS5 build, and live HTTPS to archive.org. Real-console tests are separate and opt-in. `LiveConsoleUpdateTest#connectApprovedConsole` requires `allowLiveRead=true`, `liveConsole` and `livePassword`; it checks pairing, state relay, the console's GitHub check and reconnection after native restart, then removes only its own pairing. It does not install a payload or update Payload Manager. Supply credentials privately, never in committed scripts or shared logs.
 - **PS5**: `ps5/extract/host_test.sh` runs the archive extractor on Linux; each release is also tried on a real console.
 - Restricted downloads with Archive.org keys were confirmed with `tools/Test-IaS3Access.ps1`, not for every kind of restricted item.
 

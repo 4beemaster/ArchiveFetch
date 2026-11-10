@@ -1,5 +1,8 @@
 #include "web_application.hpp"
 #include "console_link.hpp"
+#ifdef _WIN32
+#include "windows_update.hpp"
+#endif
 #ifndef __ANDROID__
 #include "web_smoke.hpp"
 #endif
@@ -160,8 +163,25 @@ int main(int argc, char** argv) {
         server.Get("/api/consoles", console_handler("/api/consoles", true));
         server.Post("/api/consoles", guarded(console_handler("/api/consoles", false)));
         server.Post("/api/relay", guarded(console_handler("/api/relay", false)));
+#ifdef _WIN32
+        std::mutex update_close_mutex;
+        std::function<void()> close_update_window;
+#endif
         server.set_logger([&](const httplib::Request& request, const httplib::Response& response) {
             if (request.method == "POST" && request.path == "/api/shutdown" && response.status == 200) { application.model.cancel(); server.stop(); }
+#ifdef _WIN32
+            if (request.method == "POST" && request.path == "/api/command" && response.status == 200 &&
+                windows_update_handoff_started.load()) {
+                const auto body = Json::parse(request.body, nullptr, false);
+                if (body.is_object() && body.contains("action") && body["action"].is_string() &&
+                    body["action"] == "installUpdate" &&
+                    windows_update_handoff_started.exchange(false)) {
+                    std::lock_guard<std::mutex> guard(update_close_mutex);
+                    if (close_update_window) close_update_window();
+                    server.stop();
+                }
+            }
+#endif
         });
         auto assets = executable_directory(argv[0]) / "web";
         if (!server.set_mount_point("/", assets.u8string())) throw std::runtime_error("Bundled web assets are missing");
@@ -184,6 +204,18 @@ int main(int argc, char** argv) {
                 window.set_size(1360, 860, WEBVIEW_HINT_NONE);
                 window.set_size(760, 520, WEBVIEW_HINT_MIN);
                 window.navigate(origin);
+                struct ClearUpdateWindow {
+                    std::mutex& mutex;
+                    std::function<void()>& close;
+                    ~ClearUpdateWindow() {
+                        std::lock_guard<std::mutex> guard(mutex);
+                        close = {};
+                    }
+                } update_window{update_close_mutex, close_update_window};
+                {
+                    std::lock_guard<std::mutex> guard(update_close_mutex);
+                    close_update_window = [&window] { window.dispatch([&window] { window.terminate(); }); };
+                }
                 window.run();
             } catch (...) { server.stop(); listener.join(); throw; }
             server.stop(); listener.join();

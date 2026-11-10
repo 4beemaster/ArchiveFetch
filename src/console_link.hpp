@@ -3,6 +3,7 @@
 // talks to a console itself: the app backend sends each request over plain HTTP to a saved address only,
 // keeps the console's session token, and holds the sign-in cookie for consoles outside the local network.
 #include "web_application.hpp"
+#include "version.hpp"
 #include <curl/curl.h>
 #include <openssl/evp.h>
 #include <condition_variable>
@@ -23,29 +24,6 @@ namespace {
 constexpr std::size_t console_limit = 32;
 constexpr std::size_t relay_response_limit = 64 * 1024 * 1024;
 constexpr const char* console_cookie = "ArchiveFetchAuth";
-
-// "0.7.0-beta.1" < "0.7.0"; unknown text compares as the oldest version.
-std::vector<long long> version_parts(const std::string& text) {
-    std::vector<long long> parts;
-    std::size_t position = 0;
-    for (int index = 0; index < 3; ++index) {
-        std::size_t used = 0;
-        try { parts.push_back(std::stoll(text.substr(position), &used)); } catch (...) { return {-1}; }
-        position += used;
-        if (index < 2) { if (position >= text.size() || text[position] != '.') return {-1}; ++position; }
-    }
-    const std::string beta = "-beta.";
-    if (position == text.size()) parts.push_back(1LL << 40);
-    else if (text.compare(position, beta.size(), beta) == 0) {
-        try { parts.push_back(std::stoll(text.substr(position + beta.size()))); } catch (...) { return {-1}; }
-    } else return {-1};
-    return parts;
-}
-
-int compare_versions(const std::string& left, const std::string& right) {
-    const auto a = version_parts(left), b = version_parts(right);
-    return a < b ? -1 : b < a ? 1 : 0;
-}
 
 struct ConsoleEntry {
     std::string id, name, address;

@@ -215,6 +215,27 @@ public final class NativeIntegrationTest {
             assertFalse(log, log.contains("[tls]"));
             assertFalse(log, log.contains("[network] Request started"));
             assertFalse(log, log.contains("[network] Request finished"));
+            JSONObject updates = command(new JSONObject().put("action", "checkUpdates").put("includeBeta", false));
+            assertFalse(updates.toString(), updates.has("error"));
+            assertEquals(NativeBridge.appVersion(), updates.getString("currentVersion"));
+            assertEquals("android", updates.getString("platform"));
+            String release = updates.getJSONObject("release").getString("url");
+            assertEquals(release, MainActivity.updateLink(release).toString());
+            JSONObject opened = command(new JSONObject().put("action", "openUpdate").put("kind", "release")
+                .put("version", updates.getString("latestVersion"))
+                .put("url", "https://example.invalid"));
+            assertEquals(release, opened.getString("openUpdate"));
+            assertTrue(command(new JSONObject().put("action", "openUpdate").put("kind", "https://example.invalid")
+                .put("version", updates.getString("latestVersion"))).has("error"));
+            for (String invalid : new String[]{"http://github.com/4beemaster/ArchiveFetch/releases/tag/v0.8.0",
+                    "https://github.com.evil.invalid/4beemaster/ArchiveFetch/releases/tag/v0.8.0",
+                    "https://github.com/other/repo/releases/tag/v0.8.0",
+                    "https://github.com/4beemaster/ArchiveFetch/releases/tag/v0.8.0?next=1",
+                    "https://github.com/4beemaster/ArchiveFetch/releases/download/v0.8.0/../evil.exe"}) {
+                boolean rejected = false;
+                try { MainActivity.updateLink(invalid); } catch (IllegalArgumentException expected) { rejected = true; }
+                assertTrue("Unexpected release URL accepted", rejected);
+            }
         } finally { NativeBridge.stop(token); }
     }
     @Test public void nativeDefaultDownloads() throws Exception {

@@ -17,6 +17,79 @@ import org.junit.runner.RunWith;
 
 @RunWith(AndroidJUnit4.class)
 public final class LiveConsoleUpdateTest {
+    @Test public void connectApprovedConsole() throws Exception {
+        Bundle arguments = InstrumentationRegistry.getArguments();
+        Assume.assumeTrue("true".equals(arguments.getString("allowLiveRead")));
+        String address = arguments.getString("liveConsole", "");
+        String password = arguments.getString("livePassword", "");
+        arguments.remove("livePassword");
+        assertFalse("An explicitly approved console address is required", address.isEmpty());
+        Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        File root = new File(context.getCacheDir(), "live_console_" + UUID.randomUUID());
+        assertTrue(root.mkdirs());
+        File ca = new File(root, "trust.pem");
+        CatalogService.writeTrust(ca);
+        NativeBridge.initialize(context);
+        JSONObject started = new JSONObject(NativeBridge.start(root.getAbsolutePath(),
+            new File(root, "downloads").getAbsolutePath(), ca.getAbsolutePath()));
+        assertFalse("Native startup failed", started.has("error"));
+        String token = new JSONObject(NativeBridge.request("/session", "{}", "")).getString("token");
+        String pairedId = "";
+        String id = "";
+        try {
+            JSONObject added = call("/api/consoles", new JSONObject().put("action", "add")
+                .put("name", "Approved connection test").put("address", address).put("port", 8890), token);
+            assertFalse("Could not add approved console", added.has("error"));
+            id = added.getJSONArray("consoles").getJSONObject(0).getString("id");
+            JSONObject login = call("/api/relay", new JSONObject().put("console", id)
+                .put("path", "/api/login").put("body", new JSONObject().put("password", password)), token);
+            password = "";
+            assertFalse("Approved console sign-in failed", login.has("error"));
+            JSONObject devices = call("/api/relay", new JSONObject().put("console", id)
+                .put("path", "/api/paired-devices"), token);
+            for (int index = 0; index < devices.getJSONArray("devices").length(); ++index) {
+                JSONObject device = devices.getJSONArray("devices").getJSONObject(index);
+                if (device.getBoolean("current")) {
+                    assertTrue("Multiple current test pairings", pairedId.isEmpty());
+                    pairedId = device.getString("id");
+                }
+            }
+            assertFalse("Connection test did not pair", pairedId.isEmpty());
+            JSONObject entry = awaitOnline(token);
+            assertEquals("online", entry.getString("status"));
+            assertTrue("Console was not paired", entry.getBoolean("paired"));
+            assertEquals(NativeBridge.appVersion(), entry.getString("version"));
+            JSONObject state = call("/api/relay", new JSONObject().put("console", id)
+                .put("path", "/api/state"), token);
+            assertEquals("Console state relay failed", "", state.optString("error", ""));
+            assertTrue("Console state response is incomplete", state.has("settings") && state.has("queue"));
+            JSONObject checked = call("/api/relay", new JSONObject().put("console", id)
+                .put("path", "/api/command").put("body", new JSONObject()
+                    .put("action", "checkUpdates").put("includeBeta", true)), token);
+            assertTrue("Console GitHub check failed", checked.getBoolean("ok"));
+            assertEquals("ps5", checked.getString("platform"));
+            assertEquals(NativeBridge.appVersion(), checked.getString("currentVersion"));
+            NativeBridge.stop(token);
+            JSONObject restarted = new JSONObject(NativeBridge.start(root.getAbsolutePath(),
+                new File(root, "downloads").getAbsolutePath(), ca.getAbsolutePath()));
+            assertFalse("Native restart failed", restarted.has("error"));
+            token = new JSONObject(NativeBridge.request("/session", "{}", "")).getString("token");
+            entry = awaitOnline(token);
+            assertEquals("online", entry.getString("status"));
+            assertTrue("Saved Android pairing did not survive native restart", entry.getBoolean("paired"));
+            assertEquals(NativeBridge.appVersion(), entry.getString("version"));
+        } finally {
+            try {
+                if (!pairedId.isEmpty()) {
+                    JSONObject removed = call("/api/relay", new JSONObject().put("console", id)
+                        .put("path", "/api/paired-devices/remove")
+                        .put("body", new JSONObject().put("id", pairedId)), token);
+                    assertTrue("Could not remove the connection test's own pairing", removed.getBoolean("ok"));
+                }
+            } finally { NativeBridge.stop(token); }
+        }
+    }
+
     @Test public void updateApprovedConsole() throws Exception {
         Bundle arguments = InstrumentationRegistry.getArguments();
         Assume.assumeTrue("true".equals(arguments.getString("allowLiveUpdate")));
@@ -114,12 +187,14 @@ public final class LiveConsoleUpdateTest {
         call("/api/consoles", new JSONObject().put("refresh", true), token);
         long deadline = SystemClock.elapsedRealtime() + 30000;
         JSONObject entry;
+        String status = "checking";
         do {
             entry = call("/api/consoles", new JSONObject(), token).getJSONArray("consoles").getJSONObject(0);
-            if (!"checking".equals(entry.getString("status"))) return entry;
+            status = entry.getString("status");
+            if ("online".equals(status)) return entry;
             Thread.sleep(100);
         } while (SystemClock.elapsedRealtime() < deadline);
-        throw new AssertionError("Console readiness check timed out; no update was retried");
+        throw new AssertionError("Console readiness check timed out (" + status + "); no update was retried");
     }
 
     private static JSONObject call(String path, JSONObject body, String token) throws Exception {

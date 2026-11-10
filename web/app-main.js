@@ -110,7 +110,111 @@ $('settings-button').addEventListener('click', () => {
   $('auth-status').textContent = settings.authenticated ? (settings.remember ? 'Saved keys loaded' : 'Session keys loaded') : 'Not configured';
   $('access-key').placeholder = settings.authenticated ? 'Unchanged' : ''; $('secret-key').placeholder = settings.authenticated ? 'Unchanged' : '';
   $('access-key').value = ''; $('secret-key').value = ''; $('settings-error').hidden = true; $('text-size').value = savedTextSize(); $('settings-dialog').showModal();
+  pollAppUpdate().catch(error => updateError(error.message));
   loadLibrary(true).catch(error => fail(error.message));
+});
+function updateError(message) {
+  $('update-error').textContent = message;
+  $('update-error').hidden = !message;
+}
+let appUpdateTimer = null;
+let stagedAppUpdate = null;
+async function pollAppUpdate() {
+  clearTimeout(appUpdateTimer);
+  const progress = await localRequest('/api/command', { action: 'updateStatus' });
+  stagedAppUpdate = progress;
+  $('update-transfer').hidden = progress.phase === 'idle';
+  $('install-verified-update').hidden = progress.phase !== 'ready' || progress.running;
+  $('cancel-app-update').hidden = !progress.running;
+  $('retry-update-completion').hidden = progress.phase !== 'installed' || !progress.warning;
+  const version = progress.version || '';
+  const messages = {
+    downloading: `Downloading ${version}: ${bytes(progress.received || 0)} / ${bytes(progress.total || 0)}.`,
+    verifying: `Verifying SHA256 for ${version}...`,
+    ready: `${version} is downloaded and verified. Installation still requires your confirmation.`,
+    installing: `Installation of ${version} has started. Follow the system installer, or wait for the PS5 to reconnect.`,
+    installed: `${version} is installed.`,
+    cancelled: 'Update download cancelled. Nothing was installed.',
+    interrupted: 'The previous update download was interrupted. Check for updates to download it again.',
+    obsolete: 'The staged update is not newer than this app. Check for updates again.',
+    failed: 'App update failed. Nothing new will be installed without verification.'
+  };
+  $('update-progress').textContent = messages[progress.phase] || '';
+  if (progress.error || progress.warning) updateError([progress.error, progress.warning].filter(Boolean).join(' '));
+  if (progress.running && $('settings-dialog').open) appUpdateTimer = setTimeout(() => {
+    pollAppUpdate().catch(error => updateError(error.message));
+  }, 1000);
+}
+$('cancel-app-update').addEventListener('click', async () => {
+  try { await localRequest('/api/command', { action: 'cancelUpdate' }); await pollAppUpdate(); }
+  catch (error) { updateError(error.message); }
+});
+$('install-verified-update').addEventListener('click', async () => {
+  const version = stagedAppUpdate?.version;
+  if (!version || !await confirmAction('Install verified ArchiveFetch update?',
+    `Install ${version}? The Windows app closes after launching its installer. Android opens the package installer. The PS5 restarts ArchiveFetch and synchronizes its existing Payload Manager copy; games and boot settings are not changed.`)) return;
+  $('install-verified-update').disabled = true; updateError('');
+  try {
+    await localRequest('/api/command', { action: 'installUpdate', version });
+    await pollAppUpdate();
+  } catch (error) { updateError(error.message); }
+  finally { $('install-verified-update').disabled = false; }
+});
+$('retry-update-completion').addEventListener('click', async () => {
+  if (!await confirmAction('Retry Payload Manager synchronization?', 'Replace only the existing stored ArchiveFetch copy with the verified running version. Its filename, slot and boot list remain unchanged.')) return;
+  try { updateError(''); await localRequest('/api/command', { action: 'retryUpdateCompletion' }); await pollAppUpdate(); }
+  catch (error) { updateError(error.message); }
+});
+function releaseButton(label, kind, url, release) {
+  if (release.platform !== 'windows' && !nativeApp) {
+    const link = node('a', label, 'release-link');
+    link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+    return link;
+  }
+  const button = node('button', label); button.type = 'button';
+  button.addEventListener('click', async () => {
+    updateError(''); button.disabled = true;
+    try {
+      await localRequest('/api/command', { action: 'openUpdate', kind, version: release.latestVersion });
+    } catch (error) { updateError(error.message); }
+    finally { button.disabled = false; }
+  });
+  return button;
+}
+$('check-updates').addEventListener('click', async () => {
+  $('check-updates').disabled = true; $('update-beta').disabled = true;
+  $('update-result').hidden = true; $('update-links').replaceChildren(); updateError('');
+  $('update-status').textContent = 'Checking GitHub releases...';
+  try {
+    const result = await localRequest('/api/command', { action: 'checkUpdates', includeBeta: $('update-beta').checked });
+    const versions = `Installed: ${result.currentVersion}. Latest published: ${result.latestVersion}.`;
+    $('update-status').textContent = result.updateAvailable ? `Update available. ${versions}`
+      : result.currentNewer ? `Your build is newer than the latest published release. ${versions}` : `You are up to date. ${versions}`;
+    $('update-url').value = result.release.url;
+    $('update-notes').textContent = result.release.notes || 'No release notes were provided.';
+    $('update-links').append(releaseButton('Open release page', 'release', result.release.url, result));
+    if (result.updateAvailable) {
+      const platform = result.updatePlatform || result.platform;
+      if (result.release.assets[platform]) {
+        if (result.release.assets.checksums) {
+          const prepare = node('button', 'Download and verify update'); prepare.type = 'button';
+          prepare.addEventListener('click', async () => {
+            prepare.disabled = true; updateError('');
+            try {
+              await localRequest('/api/command', { action: 'prepareUpdate', version: result.latestVersion });
+              await pollAppUpdate();
+            } catch (error) { updateError(error.message); }
+            finally { prepare.disabled = false; }
+          });
+          $('update-links').append(prepare);
+        } else updateError('The release has no checksum manifest; in-app installation is unavailable.');
+        $('update-links').append(releaseButton('Open download in browser', platform, result.release.assets[platform].url, result));
+      } else updateError('A newer release exists, but no matching download is attached. Check the release page.');
+    }
+    if (result.release.assets.checksums) $('update-links').append(releaseButton('Open checksums', 'checksums', result.release.assets.checksums.url, result));
+    $('update-result').hidden = false;
+  } catch (error) { $('update-status').textContent = 'Update check failed.'; updateError(error.message); }
+  finally { $('check-updates').disabled = false; $('update-beta').disabled = false; }
 });
 document.querySelectorAll('.close-dialog').forEach(button => button.addEventListener('click', () => button.closest('dialog').close()));
 $('settings-dialog').addEventListener('close', () => { $('access-key').value = ''; $('secret-key').value = ''; loadLibrary(true).catch(error => fail(error.message)); });

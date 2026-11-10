@@ -5,6 +5,7 @@
 #include "extraction.hpp"
 #include "gui_platform.hpp"
 #include "remove_tree.hpp"
+#include "release_update.hpp"
 #ifndef __ANDROID__
 #include <httplib.h>
 #endif
@@ -27,12 +28,26 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <webview/webview.h>
+#include "windows_update.hpp"
 #endif
 
 using namespace archive_catalog;
 using Json = nlohmann::json;
 
 namespace {
+constexpr const char* update_platform =
+#if defined(__ANDROID__) && defined(__x86_64__)
+    "android-x86_64";
+#elif defined(__ANDROID__)
+    "android";
+#elif defined(_WIN32)
+    "windows";
+#elif defined(PS5_PAYLOAD)
+    "ps5";
+#else
+    "other";
+#endif
+
 #ifdef __ANDROID__
 constexpr bool named_locations_supported = false;
 #else
@@ -161,6 +176,10 @@ public:
     std::string extraction_error;
     std::function<bool(const File&)> destination_exists;
     std::function<void()> open_s3_keys;
+    std::function<void(const std::string&)> open_update;
+    UpdateCheck updates;
+    ReleaseUpdate release_update;
+    std::function<void()> retry_update_completion;
     std::filesystem::path root;
     std::filesystem::path settings;
     std::filesystem::path sources;
@@ -184,6 +203,12 @@ public:
 
     explicit WebApplication(const std::filesystem::path& isolated = {}) {
 #ifdef _WIN32
+        release_update.installer = start_windows_update;
+        open_update = [](const std::string& url) {
+            const std::wstring target(url.begin(), url.end());
+            if (reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", target.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) <= 32)
+                throw std::runtime_error("Cannot open the browser for the ArchiveFetch release");
+        };
         open_s3_keys = [] {
             if (reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", L"https://archive.org/login?referer=%2Faccount%2Fs3.php", nullptr, nullptr, SW_SHOWNORMAL)) <= 32)
                 throw std::runtime_error("Cannot open the browser for Internet Archive S3 keys");
@@ -282,6 +307,7 @@ public:
                 if (auto saved = credentials->load()) { config.s3 = *saved; remember = true; }
             } catch (const std::exception& failure) { error = failure.what(); }
         }
+        release_update.configure(root, ARCHIVEFETCH_VERSION, update_platform);
     }
 
     ~WebApplication() {
@@ -1251,6 +1277,48 @@ public:
 
     Json command(const Json& value) {
         auto action = value.at("action").get<std::string>();
+        if (action == "checkUpdates") {
+            auto result = updates.check(ARCHIVEFETCH_VERSION, config.ca_bundle, value.value("includeBeta", false));
+#if defined(__ANDROID__)
+            result["platform"] = "android";
+#elif defined(_WIN32)
+            result["platform"] = "windows";
+#elif defined(PS5_PAYLOAD)
+            result["platform"] = "ps5";
+#else
+            result["platform"] = "other";
+#endif
+            result["updatePlatform"] = update_platform;
+            return result;
+        }
+        if (action == "updateStatus") return release_update.status();
+        if (action == "cancelUpdate") { release_update.cancel(); return {{"ok", true}}; }
+        if (action == "prepareUpdate") {
+            if (model.snapshot().busy) throw std::runtime_error("Finish or stop current operations before downloading an app update");
+            release_update.start(updates.install_release(update_platform, value.at("version")), config.ca_bundle);
+            return release_update.status();
+        }
+        if (action == "installUpdate") {
+            if (model.snapshot().busy) throw std::runtime_error("Finish or stop current operations before installing an app update");
+            return release_update.install(value.at("version"));
+        }
+        if (action == "updateInstallStarted") {
+            release_update.install_started(value.at("version"));
+            auto result = release_update.status();
+            result["ok"] = true;
+            return result;
+        }
+        if (action == "retryUpdateCompletion") {
+            if (model.snapshot().busy) throw std::runtime_error("Finish current operations before retrying update completion");
+            if (!retry_update_completion) throw std::runtime_error("Update completion retry is not supported on this platform");
+            retry_update_completion();
+            return release_update.status();
+        }
+        if (action == "openUpdate") {
+            const auto url = updates.link(value.at("kind").get<std::string>(), value.at("version").get<std::string>());
+            if (open_update) { open_update(url); return {{"ok", true}}; }
+            return {{"ok", true}, {"openUpdate", url}};
+        }
         if (action == "openS3Keys") {
     #ifdef __ANDROID__
             return {{"ok", true}, {"openS3Keys", true}};

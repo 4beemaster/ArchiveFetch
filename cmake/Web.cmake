@@ -33,6 +33,10 @@ target_include_directories(payload_manager_tests PRIVATE src)
 target_link_libraries(payload_manager_tests PRIVATE httplib::httplib nlohmann_json::nlohmann_json)
 add_test(NAME payload_manager_tests COMMAND payload_manager_tests)
 set_tests_properties(payload_manager_tests PROPERTIES TIMEOUT 60)
+add_executable(update_check_tests tests/update_check_tests.cpp)
+target_link_libraries(update_check_tests PRIVATE transfer nlohmann_json::nlohmann_json)
+add_test(NAME update_check_tests COMMAND update_check_tests)
+set_tests_properties(update_check_tests PROPERTIES TIMEOUT 30)
 # Runs on every build so a newer PS5 build is picked up even when the app itself did not change.
 add_custom_target(bundle_payload ALL
     COMMAND "${CMAKE_COMMAND}" -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/build-ps5 -DDESTINATION=$<TARGET_FILE_DIR:archive_catalog_web>/payload

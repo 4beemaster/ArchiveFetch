@@ -1,4 +1,5 @@
 #include "transfer.hpp"
+#include "version.hpp"
 
 #include <curl/curl.h>
 #include <openssl/evp.h>
@@ -27,8 +28,43 @@
 
 namespace archive_catalog {
 
-std::string request_error_message(const std::string& detail, long status, bool credentials_provided) {
-    if (status != 401 && status != 403) return detail;
+std::string release_page_url(int page) {
+    if (page < 1 || page > 5) throw std::runtime_error("Invalid GitHub release page");
+    return "https://api.github.com/repos/4beemaster/ArchiveFetch/releases?per_page=20&page=" + std::to_string(page);
+}
+
+bool release_asset_url_allowed(const std::string& url, bool redirect) {
+    const std::string prefix = "https://github.com/4beemaster/ArchiveFetch/releases/download/v";
+    if (url.compare(0, prefix.size(), prefix) == 0) {
+        const auto slash = url.find('/', prefix.size());
+        if (slash == std::string::npos) return false;
+        const auto version = url.substr(prefix.size(), slash - prefix.size());
+        if (!canonical_version(version)) return false;
+        const auto name = url.substr(slash + 1);
+        return name == "ArchiveFetch-" + version + "-windows-x64-setup.exe" ||
+            name == "ArchiveFetch-" + version + "-android-arm64.apk" ||
+            name == "ArchiveFetch-" + version + "-android-x86_64.apk" ||
+            name == "ArchiveFetch-" + version + ".elf" ||
+            name == "SHA256SUMS-" + version + ".txt" || name == "SHA256SUMS.txt";
+    }
+    if (!redirect || url.find_first_of("\r\n\\") != std::string::npos) return false;
+    std::unique_ptr<CURLU, decltype(&curl_url_cleanup)> parsed(curl_url(), curl_url_cleanup);
+    if (!parsed || curl_url_set(parsed.get(), CURLUPART_URL, url.c_str(), 0) != CURLUE_OK) return false;
+    auto part = [&](CURLUPart key) {
+        char* text = nullptr;
+        std::string result;
+        if (curl_url_get(parsed.get(), key, &text, 0) == CURLUE_OK) { result = text; curl_free(text); }
+        return result;
+    };
+    const auto host = part(CURLUPART_HOST);
+    return part(CURLUPART_SCHEME) == "https" &&
+        (host == "release-assets.githubusercontent.com" || host == "objects.githubusercontent.com") &&
+        part(CURLUPART_USER).empty() && part(CURLUPART_PASSWORD).empty() &&
+        part(CURLUPART_PORT).empty() && part(CURLUPART_FRAGMENT).empty();
+}
+
+std::string request_error_message(const std::string& detail, long status, bool credentials_provided, bool archive_request) {
+    if (!archive_request || (status != 401 && status != 403)) return detail;
     return detail + (credentials_provided
         ? "; Archive.org denied access: S3 keys were provided. Check them in Settings; this account may lack permission."
         : "; Archive.org denied access: S3 keys may be required. Add them in Settings.");
@@ -160,13 +196,19 @@ int transfer_progress(void* opaque, curl_off_t total, curl_off_t received, curl_
     } catch (...) { return 1; }
 }
 
-Handle request(const std::string& url, const std::string& ca_bundle, const TransferHooks& hooks) {
+Handle request(const std::string& url, const std::string& ca_bundle, const TransferHooks& hooks,
+        bool release_request = false, bool release_asset = false) {
     check_cancelled(hooks);
-    item_id(url);
+    if (release_asset) {
+        if (!release_asset_url_allowed(url, true)) throw std::runtime_error("Only official ArchiveFetch release downloads are allowed");
+    } else if (release_request) {
+        if (url.empty() || url != release_page_url(url.back() - '0'))
+            throw std::runtime_error("Only the official ArchiveFetch release API can be checked");
+    } else item_id(url);
     Handle handle(curl_easy_init(), curl_easy_cleanup);
     if (!handle) throw std::runtime_error("Cannot create HTTP request");
     option(handle.get(), CURLOPT_URL, url.c_str());
-    option(handle.get(), CURLOPT_FOLLOWLOCATION, 1L);
+    option(handle.get(), CURLOPT_FOLLOWLOCATION, release_request || release_asset ? 0L : 1L);
     option(handle.get(), CURLOPT_MAXREDIRS, 8L);
     option(handle.get(), CURLOPT_PROTOCOLS_STR, "https");
     option(handle.get(), CURLOPT_REDIR_PROTOCOLS_STR, "https");
@@ -181,7 +223,8 @@ Handle request(const std::string& url, const std::string& ca_bundle, const Trans
     option(handle.get(), CURLOPT_LOW_SPEED_LIMIT, 1024L);
     option(handle.get(), CURLOPT_LOW_SPEED_TIME, 60L);
     option(handle.get(), CURLOPT_NOSIGNAL, 1L);
-    option(handle.get(), CURLOPT_USERAGENT, "ArchiveCatalog/0.1 (metadata catalog and selected downloads)");
+    option(handle.get(), CURLOPT_USERAGENT, release_request ? "ArchiveFetch (manual release checks)"
+        : "ArchiveCatalog/0.1 (metadata catalog and selected downloads)");
     if (!ca_bundle.empty()) option(handle.get(), CURLOPT_CAINFO, ca_bundle.c_str());
     option(handle.get(), CURLOPT_NOPROGRESS, 0L);
     option(handle.get(), CURLOPT_XFERINFOFUNCTION, transfer_progress);
@@ -218,7 +261,10 @@ void check_result(CURL* handle, CURLcode result, const char* error, bool authori
     curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &status);
     curl_easy_getinfo(handle, CURLINFO_RETRY_AFTER, &retry_after);
     if (result != CURLE_OK) {
-        auto message = request_error_message(error[0] ? error : curl_easy_strerror(result), status, authorized);
+        char* effective_url = nullptr;
+        curl_easy_getinfo(handle, CURLINFO_EFFECTIVE_URL, &effective_url);
+        auto message = request_error_message(error[0] ? error : curl_easy_strerror(result), status, authorized,
+            effective_url && s3_destination_allowed(effective_url));
         throw RequestError(message, result, status, retry_after);
     }
     if (status != 200 && status != 206) throw std::runtime_error("Unexpected HTTP status " + std::to_string(status));
@@ -486,8 +532,57 @@ Http::Http(std::string ca_bundle, TransferHooks hooks, S3Credentials s3, int con
 Http::~Http() { curl_global_cleanup(); }
 
 std::string Http::get(const std::string& url, std::size_t limit) const {
+    return get_metadata(url, limit, false);
+}
+
+std::string Http::get_release_page(int page, std::size_t limit) const {
+    if (!s3_.access_key.empty() || !s3_.secret_key.empty())
+        throw std::runtime_error("Archive.org credentials cannot be used for GitHub release checks");
+    return get_metadata(release_page_url(page), limit, true);
+}
+
+std::uint64_t Http::download_release_asset(const std::string& initial, const std::filesystem::path& path,
+        std::uint64_t limit) const {
+    if (!s3_.access_key.empty() || !s3_.secret_key.empty())
+        throw std::runtime_error("Archive.org credentials cannot be used for GitHub release downloads");
+    if (!release_asset_url_allowed(initial)) throw std::runtime_error("Only official ArchiveFetch release downloads are allowed");
+    if (!limit || limit > 256ULL * 1024 * 1024) throw std::runtime_error("Invalid release download size limit");
+    regular_or_missing(path);
+    std::string url = initial;
+    for (int hop = 0; hop < 4; ++hop) {
+        auto handle = request(url, ca_bundle_, hooks_, false, true);
+        FileSink sink{std::ofstream(path, std::ios::binary | std::ios::trunc), 0, limit};
+        if (!sink.stream) throw std::runtime_error("Cannot create the release download");
+        option(handle.get(), CURLOPT_TIMEOUT, 600L);
+        option(handle.get(), CURLOPT_WRITEFUNCTION, file_write);
+        option(handle.get(), CURLOPT_WRITEDATA, &sink);
+        std::array<char, CURL_ERROR_SIZE> error{};
+        option(handle.get(), CURLOPT_ERRORBUFFER, error.data());
+        const auto result = curl_easy_perform(handle.get());
+        check_cancelled(hooks_);
+        long status = 0;
+        curl_easy_getinfo(handle.get(), CURLINFO_RESPONSE_CODE, &status);
+        if (result == CURLE_OK && (status == 301 || status == 302 || status == 303 || status == 307 || status == 308)) {
+            char* destination = nullptr;
+            curl_easy_getinfo(handle.get(), CURLINFO_REDIRECT_URL, &destination);
+            if (!destination || !release_asset_url_allowed(destination, true))
+                throw std::runtime_error("GitHub redirected the release download outside its allowed asset hosts");
+            url = destination;
+            continue;
+        }
+        check_result(handle.get(), result, error.data(), false);
+        if (status != 200) throw std::runtime_error("The release server returned an incomplete download");
+        sink.stream.flush();
+        if (!sink.stream) throw std::runtime_error("Cannot finish writing the release download");
+        if (!sink.received) throw std::runtime_error("GitHub returned an empty release download");
+        return sink.received;
+    }
+    throw std::runtime_error("Too many release download redirects");
+}
+
+std::string Http::get_metadata(const std::string& url, std::size_t limit, bool release_request) const {
     for (int attempt = 0; attempt < 3; ++attempt) {
-        auto handle = request(url, ca_bundle_, hooks_);
+        auto handle = request(url, ca_bundle_, hooks_, release_request);
         MemorySink sink{{}, limit};
         option(handle.get(), CURLOPT_TIMEOUT, 120L);
         option(handle.get(), CURLOPT_WRITEFUNCTION, memory_write);
@@ -509,12 +604,10 @@ std::string Http::get(const std::string& url, std::size_t limit) const {
     throw std::runtime_error("Metadata retry limit exceeded");
 }
 
-void verify_file(const File& file, const std::filesystem::path& path, const TransferHooks& hooks) {
+namespace {
+std::string file_digest(const std::filesystem::path& path, const EVP_MD* algorithm, const TransferHooks& hooks) {
     check_cancelled(hooks);
-    if (std::filesystem::file_size(path) != file.size) throw std::runtime_error("Size mismatch: " + file.name);
-    const auto& expected = file.sha1.empty() ? file.md5 : file.sha1;
-    if (expected.empty()) throw std::runtime_error("No checksum available for " + file.name);
-    auto* algorithm = file.sha1.empty() ? EVP_md5() : EVP_sha1();
+    const auto size = std::filesystem::file_size(path);
     std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context(EVP_MD_CTX_new(), EVP_MD_CTX_free);
     if (!context || EVP_DigestInit_ex(context.get(), algorithm, nullptr) != 1) throw std::runtime_error("Cannot initialize checksum verification");
     std::ifstream input(path, std::ios::binary);
@@ -522,14 +615,14 @@ void verify_file(const File& file, const std::filesystem::path& path, const Tran
     // On the heap: PS5 payload threads have small default stacks.
     std::vector<char> buffer(128 * 1024);
     std::uint64_t checked = 0, reported = 0;
-    if (hooks.stage) hooks.stage("Verifying", 0, file.size);
+    if (hooks.stage) hooks.stage("Verifying", 0, size);
     while (input.read(buffer.data(), static_cast<std::streamsize>(buffer.size())) || input.gcount()) {
         check_cancelled(hooks);
         if (EVP_DigestUpdate(context.get(), buffer.data(), static_cast<std::size_t>(input.gcount())) != 1) throw std::runtime_error("Checksum update failed");
         checked += static_cast<std::uint64_t>(input.gcount());
-        if (hooks.stage && (checked - reported >= 4 * 1024 * 1024 || checked == file.size)) {
+        if (hooks.stage && (checked - reported >= 4 * 1024 * 1024 || checked == size)) {
             reported = checked;
-            hooks.stage("Verifying", checked, file.size);
+            hooks.stage("Verifying", checked, size);
         }
     }
     if (!input.eof()) throw std::runtime_error("Read failure during checksum verification");
@@ -542,7 +635,22 @@ void verify_file(const File& file, const std::filesystem::path& path, const Tran
         actual += hexadecimal[digest[index] >> 4];
         actual += hexadecimal[digest[index] & 15];
     }
-    if (actual != expected) throw std::runtime_error("Checksum mismatch: " + file.name);
+    return actual;
+}
+}
+
+std::string sha256_file(const std::filesystem::path& path, const TransferHooks& hooks) {
+    regular_or_missing(path);
+    return file_digest(path, EVP_sha256(), hooks);
+}
+
+void verify_file(const File& file, const std::filesystem::path& path, const TransferHooks& hooks) {
+    check_cancelled(hooks);
+    if (std::filesystem::file_size(path) != file.size) throw std::runtime_error("Size mismatch: " + file.name);
+    const auto& expected = file.sha1.empty() ? file.md5 : file.sha1;
+    if (expected.empty()) throw std::runtime_error("No checksum available for " + file.name);
+    if (file_digest(path, file.sha1.empty() ? EVP_md5() : EVP_sha1(), hooks) != expected)
+        throw std::runtime_error("Checksum mismatch: " + file.name);
 }
 
 std::filesystem::path download_target(const std::filesystem::path& directory, const File& file) {

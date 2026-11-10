@@ -577,6 +577,26 @@ bool api_init(const char* data_root) {
             app->config.ca_bundle = embedded_ca;
             ca_source = embedded_ca.empty() ? "none" : "embedded";
         }
+        app->release_update.installer = [](const std::filesystem::path& path, const std::string& version) {
+            std::ifstream input(path, std::ios::binary);
+            char magic[4]{};
+            if (!input.read(magic, sizeof(magic)) || std::memcmp(magic, "\x7f" "ELF", sizeof(magic)) != 0)
+                throw std::runtime_error("The verified PS5 update is not an ELF payload");
+            std::string error;
+            if (!send_to_local_loader(path, error))
+                throw std::runtime_error("The console's local ELF loader did not accept the verified update: " + error);
+            log_event("GITHUB_UPDATE_SENT", {field("version", version.c_str())});
+        };
+        const auto finish_update = [](const std::filesystem::path& path) {
+            httplib::Client manager("127.0.0.1", 8084);
+            const auto result = sync_payload_manager(manager, path);
+            log_event("GITHUB_UPDATE_PM_SYNC", {field("result", result.replaced ? "replaced" : "not-stored"),
+                field("filename", result.filename.c_str())});
+        };
+        app->release_update.complete_pending(finish_update);
+        app->retry_update_completion = [backend = app.get(), finish_update] {
+            backend->release_update.retry_completion(finish_update);
+        };
         const auto state = app->model.snapshot();
         set_transfer_observer(log_transfer);
         log_event("APP_INIT_END", {field("sources", static_cast<long long>(state.sources.size())),

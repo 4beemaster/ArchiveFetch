@@ -23,6 +23,9 @@ int main() {
             if (request_error_message(detail, status, false) != detail + "; Archive.org denied access: S3 keys may be required. Add them in Settings." ||
                 request_error_message(detail, status, true) != detail + "; Archive.org denied access: S3 keys were provided. Check them in Settings; this account may lack permission.")
                 throw std::runtime_error("Access-denied guidance must distinguish missing and supplied keys");
+            if (request_error_message(detail, status, false, false) != detail ||
+                request_error_message(detail, status, true, false) != detail)
+                throw std::runtime_error("GitHub access errors must not suggest changing Archive.org S3 keys");
         }
         for (bool provided : {false, true}) {
             if (request_error_message("Server unavailable", 503, provided) != "Server unavailable")
