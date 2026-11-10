@@ -11,10 +11,11 @@ Working plan; versions and details can still change.
 - **0.7.0**: the Windows and Android apps connect to consoles: saved consoles with status dots and a target switcher, remote control through the app's backend, password sign-in and permanent pairing, a home-network scan, Install / Update of the console's ArchiveFetch from the app, and an add-only Merge in either direction; also comma-separated hidden file types and a hide button with Undo.
 - **0.7.1**: fixes: Clean library with hidden file types, deleting extracted folders on the PS5 (with the real space freed), extracted downloads recognized in every download location, a simpler Clean library popup (delete downloads and/or remove entries, with a second confirmation), and no local build paths in the Android app.
 - **0.7.2**: console updates go through ArchiveFetch on port 8890, which hands the payload to the console's own loader, so the loader port no longer has to be reachable from other devices; a banner shows when a console runs an older or newer ArchiveFetch than the app; Downloads shows each transfer's speed and time left; **Connections per download** (1 to 8, default 4, now also on Windows and Android) with refused parts retrying on their own; request bodies other than updates are limited to 1 MB.
+- **0.7.3**: app-driven console updates also replace the existing ArchiveFetch copy through itsPLK Payload Manager's own API, preserving its filename, slot and boot list. Compatible with Payload Manager 0.6.3's upload guard. Failed synchronization keeps the running update and shows a warning with Retry update. Windows gains a per-user installer with data-preserving manual upgrades.
 
 ## Next
 
-- **0.7.3**: updating a console also replaces the ArchiveFetch copy that itsPLK's Payload Manager starts at boot, through Payload Manager's own API, under the same name and with the boot list unchanged; otherwise a restart brings the old version back.
+- **0.8.0**: user-controlled GitHub update checking, with release information and links to the matching app downloads. Automatic installation and Android release signing require separate implementation and validation.
 
 ## 1.0.0
 

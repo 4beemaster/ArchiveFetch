@@ -1,6 +1,6 @@
 # ArchiveFetch
 
-Current development version: **0.7.2**, the same for the Windows, Android and PS5 apps. It lives in the `VERSION` file, which every build reads; the apps show it next to the ArchiveFetch name. Android's version code is derived from it (0.6.0-beta.1 = 6001, the 0.6.0 release = 6099) so each build installs over the earlier ones. Versions below 1.0 indicate an evolving, not-yet-stable project.
+Current version: **0.7.3**, the same for the Windows, Android and PS5 apps. It lives in the `VERSION` file, which every build reads; the apps show it next to the ArchiveFetch name. Android's version code is derived from it (0.6.0-beta.1 = 6001, the 0.6.0 release = 6099) so each build installs over the earlier ones. Versions below 1.0 indicate an evolving, not-yet-stable project.
 
 A Windows/Android HTML interface, a PS5 app served to the console browser and local network, desktop command-line client, and legacy headless PS5 ELF payload for combining Internet Archive file manifests and downloading explicitly selected files. The interfaces reuse the native catalog and download worker model.
 
@@ -43,7 +43,7 @@ From the project directory:
 .\build\archive_catalog_web.exe
 ```
 
-This opens an integrated WebView2 window, not the default browser. The Microsoft Edge WebView2 Runtime must be installed. Keep the generated `web` directory beside the executable, including its fonts and license notices. Native runtime dependencies (compiler runtime, libxml2, OpenSSL) must be available on `PATH`; this is not yet a standalone installer.
+This opens an integrated WebView2 window, not the default browser. The Microsoft Edge WebView2 Runtime must be installed. Keep the generated `web` directory beside the executable, including its fonts and license notices. For a source build, native runtime dependencies (compiler runtime, libxml2, OpenSSL) must be available on `PATH`. The release's Windows installer bundles those dependencies.
 
 - Sources supports adding Archive.org links, optional related parts, persistent custom tags, individual selection/removal, scanning, and clearing the source list without deleting the library. Source selection applies only to visible rows.
 - Sources and Library include a Filters menu with type-ahead multi-select dropdowns, removable active-filter chips, and sorting with A-Z/Z-A direction choices. Clicking a column header also sorts by it; clicking the sorted header again reverses the direction. Library separates inherited Source Tags from editable file-specific Tags; its Tags filter matches either column. File tags are saved locally by Archive.org item and full filename, independently of catalog imports and exports. Library also includes filename search, an Extension column (the last `.xxx` of the filename, so `.n64.zip` shows `.zip`), source/extension/access/favorite/download-status filters, favorites, XML import, catalog export, and paged file selection. Existing-file replacements require confirmation. Queue additions use catalog revisions to reject stale selections.
@@ -67,6 +67,22 @@ Start-Process .\build\archive_catalog_web.exe -ArgumentList '--no-browser --port
 ```
 
 Then open `http://127.0.0.1:48931`. Use a different port if occupied. `--data-dir PATH` isolates settings, sources, library, favorites, and credentials for testing. The offline `--smoke-test` option creates synthetic files in an isolated directory and tests real HTTP routes, session/origin/host guards, secret exclusion, overwrite confirmation, queue commands, and restart persistence. It is also registered as `web_api_tests` in CTest. An explicitly supplied smoke-test data directory must be empty.
+
+### Windows installer
+
+The Windows setup EXE installs for the current user without administrator access, with Start menu and optional desktop shortcuts. Run a newer setup EXE to upgrade the same installation. Settings, pairing, credentials, library records and downloaded files are not part of the installed-file set and are not deleted by uninstall. The installer does not check GitHub for updates; download and run each newer installer manually.
+
+Installed shortcuts use `%LOCALAPPDATA%\ArchiveCatalog` as their working directory, keeping `gui-config.xml` and `gui-sources.xml` outside the install folder alongside the existing application data. When moving from a portable/development build for the first time, close the old app and copy those two files from its previous working directory if needed; existing relative download/export paths may need updating. Later installer upgrades keep that location unchanged. Do not run multiple frontends against the same saved data.
+
+Microsoft Edge WebView2 Runtime must be installed. Setup checks for it and, if missing, offers the official download page rather than silently fetching or installing another program. Install the Evergreen Runtime and rerun setup. Beta installers are unsigned; Windows may display an unknown-publisher warning.
+
+To build setup from a validated portable package (EXE, runtime DLLs, web assets, licenses and matching `payload` folder), install Inno Setup 6 or 7 and run:
+
+```powershell
+.\packaging\windows\build-installer.ps1 -PackageDir .\build-windows-portable\ArchiveFetch-0.7.3-windows-x64
+```
+
+The script requires the bundled payload version and hash to match the current PS5 build. Privacy-scan all staged files and the resulting installer before distributing either. The stable setup application ID keeps beta/release upgrades in the same per-user installation.
 
 Android uses the separate native wrapper below, not the Windows HTTP host.
 
@@ -148,9 +164,11 @@ The switcher at the top of the sidebar in the Windows and Android apps chooses *
 
 **Sources > Merge** (Windows and Android apps, once a console is saved) copies from this device to a console or from a console to this device: the selected sources (on the side you merge from) or all of them, with any of sources and collections, the Library catalog, file tags and favorites. **Preview** lists what would be added and every tag difference (a source or file tagged differently on both sides), each with **Add tags** or **Keep as is**, plus Add all and Keep all. Merging only adds: new sources (unscanned, joining a collection of the same name or a new one), catalog files of sources the other side has, missing tags and favorites; nothing is removed, renamed or replaced, and settings, keys, download locations, the queue and download status are never copied. Sources are matched by link, files by source and name, collections by name. Large merges are sent in parts; each part only adds, so after an interruption a new preview continues where it stopped. With a console chosen, Sources, Library, Downloads and Settings show and change the console; Export writes on the console, Import and Share are not offered, and display preferences, the console list and Diagnostics stay on this device. The app's backend sends each request to the saved address over plain HTTP; the page never talks to the console itself. A console outside this device's network asks for its password the first time. The first time the app controls a console (0.7.0 or later), it **pairs**: the console gives it a permanent device key, so later connections, including after restarting the app and from outside the console's network, need no password. The key is saved encrypted (Windows DPAPI, Android Keystore); the console keeps only a SHA-256 fingerprint in `/data/archivefetch/paired-devices.json` and lists paired apps in **Settings > Network > Paired devices**, where **Remove** revokes one. A removed app does not pair again on its own; it pairs again after signing in with the password, or after the console is removed from and added back to the app's list. Changing the password does not remove paired apps. The list is saved in `consoles.json` in the app's data folder.
 
+Starting with 0.7.3, an app update also replaces the console's existing ArchiveFetch copy in itsPLK's Payload Manager, so a reboot does not bring back the old payload. After the new ArchiveFetch starts, the app sends its payload once more to `POST /api/payload-manager/update`; this works even when upgrading from 0.7.2, whose updater does not know about Payload Manager. The console uses Payload Manager's own loopback HTTP API on port 8084, preserving the existing filename, slot and boot list. No copy is added when none exists; USB copies, repository-managed entries, ambiguous duplicates and folders shared with other payloads are not overwritten. If synchronization fails, the running update stays in place and the app keeps a warning visible, with **Retry update**. Sending an ELF directly to port 9021 without the app does not synchronize Payload Manager.
+
 ## PS5 App
 
-Version **0.7.2**. ArchiveFetch runs on a jailbroken PS5 as a payload ELF and serves its web interface on port **8890**, to the console's own browser and to phones or computers on the same network. Verified on firmware 13.60.
+Version **0.7.3**. ArchiveFetch runs on a jailbroken PS5 as a payload ELF and serves its web interface on port **8890**, to the console's own browser and to phones or computers on the same network. Verified on firmware 13.60.
 
 ### Install and open
 
@@ -227,7 +245,7 @@ Exit codes: 0 success, 1 configuration/setup error, 2 incomplete scan, 3 one or 
 
 ## Testing
 
-- **Windows** (`ctest --test-dir build`, six suites): catalog parsing and import/export, hidden file types, path safety, checksums, configuration, the queue and partial downloads, S3 key handling, the DPAPI credential store (using temporary files, never real secrets), and the web API smoke test (`archive_catalog_web --smoke-test`), which also covers console control, pairing, the network scan, Install/Update and Merge against stand-in consoles on this computer.
+- **Windows** (`ctest --test-dir build`, seven suites): catalog parsing and import/export, hidden file types, path safety, checksums, configuration, the queue and partial downloads, S3 key handling, the DPAPI credential store (using temporary files, never real secrets), and the web API smoke test (`archive_catalog_web --smoke-test`), which also covers console control, pairing, the network scan, Install/Update, boot-copy warnings/retries and Merge against stand-in consoles on this computer. `payload_manager_tests` uses a loopback stand-in to test Payload Manager 0.5/0.6 replacement, filename/slot preservation, refused unsafe destinations and upload failures without touching a console or boot list.
 - **Android** (instrumentation tests on an emulator): the native backend, settings and credential storage, downloads and the folder picker, the WebView interface, console control and pairing, the bundled PS5 build, and live HTTPS to archive.org.
 - **PS5**: `ps5/extract/host_test.sh` runs the archive extractor on Linux; each release is also tried on a real console.
 - Restricted downloads with Archive.org keys were confirmed with `tools/Test-IaS3Access.ps1`, not for every kind of restricted item.

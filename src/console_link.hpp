@@ -662,9 +662,34 @@ private:
                     if (value.is_object() && value.value("version", "") == ARCHIVEFETCH_VERSION) {
                         {
                             std::lock_guard<std::mutex> lock(mutex_);
+                            sessions_[entry.id].token.clear();
+                        }
+                        update({{"stage", "syncing"}, {"sent", 0}});
+                        try {
+                            // Do this on the successor too: an older ArchiveFetch cannot sync the boot copy during handoff.
+                            if (!value.value("payloadManagerSync", false))
+                                throw std::runtime_error("The console does not support Payload Manager synchronization");
+                            const auto sync = [&] {
+                                const auto opened = session(entry);
+                                if (opened.status != 200) return opened;
+                                return send(entry, "POST", "/api/payload-manager/update", "", true, 600, &elf, progress);
+                            };
+                            auto reply = sync();
+                            if (reply.status == 403) reply = sync();
+                            const auto result = Json::parse(reply.body, nullptr, false);
+                            if (reply.status != 200 || !result.is_object() || !result.contains("replaced") || !result.at("replaced").is_boolean()) {
+                                const auto reason = result.is_object() ? result.value("error", std::string()) : std::string();
+                                throw std::runtime_error(reason.empty() ? "Payload Manager synchronization returned HTTP " + std::to_string(reply.status) : reason);
+                            }
+                            update({{"payloadManager", result.at("replaced").get<bool>() ? "updated" : "not-stored"}});
+                        } catch (const std::exception& failure) {
+                            update({{"warning", "The running ArchiveFetch was updated, but its Payload Manager boot copy was not updated: " +
+                                std::string(failure.what()) + ". A restart may bring back the old version."}});
+                        }
+                        {
+                            std::lock_guard<std::mutex> lock(mutex_);
                             installs_[entry.id]["running"] = false;
                             installs_[entry.id]["stage"] = "done";
-                            sessions_[entry.id].token.clear();
                             refresh_ = true;
                         }
                         wake_.notify_all();

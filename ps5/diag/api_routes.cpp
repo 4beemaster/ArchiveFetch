@@ -41,6 +41,7 @@
 #include "ca_bundle.hpp"
 #include "diag_log.hpp"
 #include "extract_runner.hpp"
+#include "payload_manager.hpp"
 
 namespace archivefetch_diag {
 namespace {
@@ -508,8 +509,9 @@ httplib::Server::Handler guarded(bool needs_session, ApiHandler handler) {
 }
 
 bool api_accept_peer(const httplib::Request& request, httplib::Response& response) {
-    // Only /api/update takes large bodies; anything else over 1 MB, or without a length, is refused before it is read.
-    if (request.path != "/api/update" && (request.has_header("Transfer-Encoding") || request.get_header_value_u64("Content-Length") > small_body_limit)) {
+    // Payload uploads need larger bodies; other routes stay limited before their body is read.
+    if (request.path != "/api/update" && request.path != "/api/payload-manager/update" &&
+        (request.has_header("Transfer-Encoding") || request.get_header_value_u64("Content-Length") > small_body_limit)) {
         response.status = 413;
         set_json(response, "{\"error\":\"Request too large\"}");
         return false;
@@ -603,19 +605,25 @@ void api_register_routes(httplib::Server& http) {
         const auto device = paired_device(request);
         if (!local && !signed_in(request) && device.empty()) {
             response.status = 401;
-            set_json(response, Json({{"error", "Sign in required"}, {"login", true}, {"version", version}, {"pairing", true}, {"selfUpdate", true}}).dump());
+            set_json(response, Json({{"error", "Sign in required"}, {"login", true}, {"version", version}, {"pairing", true}, {"selfUpdate", true}, {"payloadManagerSync", true}}).dump());
             return;
         }
         set_json(response, Json({{"token", session_token}, {"network", true}, {"folderBrowser", true}, {"version", version},
-            {"remoteAccess", true}, {"logFile", true}, {"signedIn", !local}, {"pairing", true}, {"paired", !device.empty()}, {"selfUpdate", true}}).dump());
+            {"remoteAccess", true}, {"logFile", true}, {"signedIn", !local}, {"pairing", true}, {"paired", !device.empty()}, {"selfUpdate", true}, {"payloadManagerSync", true}}).dump());
     }));
     // The apps send a newer ArchiveFetch here; this copy hands it to the console's own loader on 127.0.0.1,
     // so the loader port never has to be reachable from other devices. Same access rules as every other /api route.
-    http.Post("/api/update", [](const httplib::Request& request, httplib::Response& response, const httplib::ContentReader& content) {
+    const auto receive_payload = [](const httplib::Request& request, httplib::Response& response, const httplib::ContentReader& content) {
         if (const char* reason = denial(request, true)) {
             log_event("API_ACCESS_DENIED", {field("reason", reason), field("path", request.path.c_str()), field("peer", request.remote_addr.c_str())});
             response.status = 403;
             set_json(response, "{\"error\":\"Access denied\"}");
+            return;
+        }
+        const bool sync_only = request.path == "/api/payload-manager/update";
+        if (sync_only && request.get_header_value("X-ArchiveFetch-Version") != version) {
+            response.status = 409;
+            set_json(response, "{\"error\":\"The stored payload must match the running ArchiveFetch version\"}");
             return;
         }
         const auto length = request.get_header_value_u64("Content-Length");
@@ -632,8 +640,14 @@ void api_register_routes(httplib::Server& http) {
             return;
         }
         struct Done { ~Done() { updating = false; } } done;
-        std::error_code ignored;
-        std::filesystem::create_directories(update_path.parent_path(), ignored);
+        std::error_code directory_error;
+        std::filesystem::create_directories(update_path.parent_path(), directory_error);
+        if (directory_error) {
+            log_event("UPDATE_FAILED", {field("error", directory_error.message().c_str())});
+            response.status = 500;
+            set_json(response, "{\"error\":\"Cannot create the payload upload folder\"}");
+            return;
+        }
         auto part = update_path;
         part += ".part";
         std::uint64_t received = 0;
@@ -657,9 +671,29 @@ void api_register_routes(httplib::Server& http) {
             set_json(response, "{\"error\":\"That is not a complete PS5 payload\"}");
             return;
         }
-        rename(part.c_str(), update_path.c_str());
+        if (rename(part.c_str(), update_path.c_str()) != 0) {
+            log_event("UPDATE_FAILED", {field("error", std::strerror(errno))});
+            unlink(part.c_str());
+            response.status = 500;
+            set_json(response, "{\"error\":\"Cannot finish storing the uploaded payload\"}");
+            return;
+        }
         const auto offered = request.get_header_value("X-ArchiveFetch-Version").substr(0, 32);
         log_event("UPDATE_RECEIVED", {field("bytes", static_cast<long long>(received)), field("version", offered.c_str()), field("peer", request.remote_addr.c_str())});
+        if (sync_only) {
+            try {
+                httplib::Client manager("127.0.0.1", 8084);
+                const auto result = sync_payload_manager(manager, update_path);
+                log_event("PAYLOAD_MANAGER_SYNC", {field("result", result.replaced ? "replaced" : "not-stored"), field("filename", result.filename.c_str())});
+                set_json(response, Json({{"replaced", result.replaced}, {"filename", result.filename}}).dump());
+            } catch (const std::exception& failure) {
+                log_event("PAYLOAD_MANAGER_SYNC_FAILED", {field("error", failure.what())});
+                response.status = 502;
+                set_json(response, Json({{"error", failure.what()}}).dump());
+            }
+            unlink(update_path.c_str());
+            return;
+        }
         std::string error;
         const bool sent = send_to_local_loader(update_path, error);
         unlink(update_path.c_str());
@@ -672,7 +706,9 @@ void api_register_routes(httplib::Server& http) {
         // The new copy starts and asks this one to stop; the reply goes out before that.
         log_event("UPDATE_SENT", {field("bytes", static_cast<long long>(received)), field("version", offered.c_str())});
         set_json(response, Json({{"ok", true}, {"bytes", received}}).dump());
-    });
+    };
+    http.Post("/api/update", receive_payload);
+    http.Post("/api/payload-manager/update", receive_payload);
     // An app pairs once (from the local network, or after signing in from outside) and then needs no password.
     http.Post("/api/pair", guarded(true, [](const httplib::Request& request, httplib::Response& response) {
         try {

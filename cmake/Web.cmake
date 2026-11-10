@@ -28,6 +28,11 @@ if(WIN32)
 endif()
 add_test(NAME web_api_tests COMMAND archive_catalog_web --smoke-test)
 set_tests_properties(web_api_tests PROPERTIES TIMEOUT 60)
+add_executable(payload_manager_tests tests/payload_manager_tests.cpp)
+target_include_directories(payload_manager_tests PRIVATE src)
+target_link_libraries(payload_manager_tests PRIVATE httplib::httplib nlohmann_json::nlohmann_json)
+add_test(NAME payload_manager_tests COMMAND payload_manager_tests)
+set_tests_properties(payload_manager_tests PROPERTIES TIMEOUT 60)
 # Runs on every build so a newer PS5 build is picked up even when the app itself did not change.
 add_custom_target(bundle_payload ALL
     COMMAND "${CMAKE_COMMAND}" -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/build-ps5 -DDESTINATION=$<TARGET_FILE_DIR:archive_catalog_web>/payload

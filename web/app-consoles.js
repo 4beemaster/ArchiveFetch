@@ -11,7 +11,8 @@ function consoleState(entry) { return entry.status === 'online' && entry.older ?
 function installText(install) {
   if (install.stage === 'sending') return `Sending ArchiveFetch ${install.version}: ${Math.floor(install.sent * 100 / Math.max(1, install.total))}%`;
   if (install.stage === 'starting') return `Sent; waiting for ArchiveFetch ${install.version} to start`;
-  if (install.stage === 'done') return `Updated to ArchiveFetch ${install.version}`;
+  if (install.stage === 'syncing') return `ArchiveFetch ${install.version} started; updating its Payload Manager copy: ${Math.floor(install.sent * 100 / Math.max(1, install.total))}%`;
+  if (install.stage === 'done') return install.warning || `Updated to ArchiveFetch ${install.version}${install.payloadManager === 'updated' ? ', including its Payload Manager copy' : ''}`;
   return `Update failed: ${install.error}`;
 }
 function consoleDetail(entry) {
@@ -25,6 +26,7 @@ function consoleDetail(entry) {
 // Offered for an older ArchiveFetch, and for a console that does not answer (it may only be running its loader).
 function installLabel(entry) {
   if (!payloadAvailable || entry.install?.running) return '';
+  if (entry.install?.warning && !entry.newer) return 'Retry update';
   if (entry.older) return 'Update ArchiveFetch';
   return entry.status === 'offline' || entry.status === 'refused' ? 'Install ArchiveFetch' : '';
 }
@@ -32,7 +34,7 @@ async function installConsole(entry) {
   const message = entry.selfUpdate && entry.status !== 'offline' && entry.status !== 'refused'
     ? `This app sends its ArchiveFetch payload to ArchiveFetch on ${entry.name}, which starts it with the console's own ELF loader. The loader must be running on the console, but its port does not need to be reachable from here.`
     : `This app sends its ArchiveFetch payload to ${entry.address} on port ${entry.loader}, the console's ELF loader. Start the loader on the console first; a running ArchiveFetch hands over to the new one.`;
-  if (!await confirmAction(`${installLabel(entry)} on ${entry.name}?`, message)) return;
+  if (!await confirmAction(`${installLabel(entry)} on ${entry.name}?`, `${message} After it starts, this app also replaces its existing ArchiveFetch copy in Payload Manager, under the same name and without changing the boot list. If that fails, the running update stays in place and a warning is shown.`)) return;
   try {
     let result = await localRequest('/api/consoles', { action: 'install', id: entry.id });
     payloadAvailable = !!result.payload; consoleList = result.consoles; renderTargets();
@@ -47,7 +49,7 @@ async function installConsole(entry) {
 // One banner for a console whose ArchiveFetch differs from this app: the console being controlled, or on This device the first saved one.
 function bannerKey(entry) { return `archivefetch-banner:${entry.id}:${entry.version}:${appVersion}`; }
 function bannerConsole() {
-  const differs = entry => entry.install?.running || (entry.version && (entry.older || entry.newer) &&
+  const differs = entry => entry.install?.running || ((entry.install?.warning || (entry.version && (entry.older || entry.newer))) &&
     (() => { try { return localStorage.getItem(bannerKey(entry)) !== 'dismissed'; } catch { return true; } })());
   if (consoleTarget) return consoleList.find(entry => entry.id === consoleTarget && differs(entry)) || null;
   return consoleList.find(differs) || null;
@@ -60,6 +62,10 @@ function renderUpdateBanner() {
   const newer = !install?.running && entry.newer;
   let text, action = '';
   if (install?.running) text = `${entry.name}: ${installText(install)}`;
+  else if (install?.warning) {
+    text = `${entry.name}: ${install.warning}`;
+    if (payloadAvailable && !entry.newer) action = 'Retry update';
+  }
   // This app only carries its own version, so it never puts an older ArchiveFetch on the console.
   else if (newer) text = `${entry.name} runs ArchiveFetch ${entry.version}, which is newer than this app (${appVersion}). Install ArchiveFetch ${entry.version} on this device to match.`;
   else {

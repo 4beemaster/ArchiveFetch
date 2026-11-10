@@ -11,7 +11,7 @@ void require(bool condition, const char* message) {
 
 // A stand-in ELF loader on loopback: it reads one payload, then the stand-in console reports the new version.
 // Then the stand-in console takes the payload itself on /api/update, as ArchiveFetch 0.7.2 and later do.
-struct ConsoleUpdate { bool& outside; bool& self_update; bool& loader_down; std::size_t& uploaded; };
+struct ConsoleUpdate { bool& outside; bool& self_update; bool& loader_down; std::size_t& uploaded; bool& pm_fail; std::size_t& pm_uploaded; };
 void install_smoke(const std::filesystem::path& root, int console_port, std::mutex& mutex, std::string& console_version, const ConsoleUpdate& update) {
     const auto payload = root / "payload";
     std::filesystem::create_directories(payload);
@@ -68,8 +68,9 @@ void install_smoke(const std::filesystem::path& root, int console_port, std::mut
 #else
     close(server);
 #endif
-    require(install.value("stage", "") == "done" && install.at("sent") == elf.size() && received == elf.size() && install.value("route", "") == "loader",
-        "Install sends the bundled payload to the loader and waits for the new version");
+    require(install.value("stage", "") == "done" && received == elf.size() && install.value("route", "") == "loader" &&
+        !install.value("warning", "").empty(),
+        "Install through the loader succeeds but warns when boot-copy synchronization needs sign-in");
     std::ifstream saved(root / "install-consoles.json", std::ios::binary);
     require(Json::parse(saved).at("consoles").at(0).at("loader") == loader_port, "A console's loader port is saved");
 
@@ -101,6 +102,25 @@ void install_smoke(const std::filesystem::path& root, int console_port, std::mut
         std::lock_guard<std::mutex> guard(mutex);
         require(install.value("stage", "") == "done" && install.at("sent") == elf.size() && update.uploaded == elf.size(),
             "Update goes through ArchiveFetch on port 8890 when the console supports it");
+        require(install.value("payloadManager", "") == "updated" && update.pm_uploaded == elf.size(),
+            "Updating an older console also uploads its boot copy through the successor");
+        update.pm_fail = true;
+        console_version = "0.7.2";
+    }
+    installer.command({{"action", "install"}, {"id", id}});
+    install = finished();
+    require(install.value("stage", "") == "done" && !install.value("warning", "").empty(),
+        "A boot-copy failure keeps the running update and explicitly warns the user");
+    {
+        std::lock_guard<std::mutex> guard(mutex);
+        update.pm_fail = false;
+    }
+    installer.command({{"action", "install"}, {"id", id}});
+    install = finished();
+    require(install.value("stage", "") == "done" && install.value("warning", "").empty() && install.value("payloadManager", "") == "updated",
+        "Retrying a partial update clears its warning after the boot copy succeeds");
+    {
+        std::lock_guard<std::mutex> guard(mutex);
         console_version = "99.0.0";
     }
     listed = status("newer");
@@ -165,8 +185,8 @@ void console_smoke(httplib::Client& client, const httplib::Headers& headers, con
     httplib::Server console;
     std::mutex mutex;
     std::string token = "first-token", seen_host, console_version = "0.6.0";
-    bool outside = false, self_update = false, loader_down = false;
-    std::size_t uploaded = 0;
+    bool outside = false, self_update = false, loader_down = false, pm_fail = false;
+    std::size_t uploaded = 0, pm_uploaded = 0;
     std::map<std::string, std::string> devices;
     // Callers hold mutex.
     const auto paired = [&](const httplib::Request& request) {
@@ -178,8 +198,8 @@ void console_smoke(httplib::Client& client, const httplib::Headers& headers, con
     console.Get("/session", [&](const httplib::Request& request, httplib::Response& response) {
         std::lock_guard<std::mutex> guard(mutex);
         seen_host = request.get_header_value("Host");
-        if (outside && !signed_in(request)) { response.status = 401; response.set_content(Json({{"error", "Sign in required"}, {"login", true}, {"version", console_version}, {"pairing", true}, {"selfUpdate", self_update}}).dump(), "application/json"); return; }
-        response.set_content(Json({{"token", token}, {"version", console_version}, {"folderBrowser", true}, {"pairing", true}, {"paired", paired(request)}, {"selfUpdate", self_update}}).dump(), "application/json");
+        if (outside && !signed_in(request)) { response.status = 401; response.set_content(Json({{"error", "Sign in required"}, {"login", true}, {"version", console_version}, {"pairing", true}, {"selfUpdate", self_update}, {"payloadManagerSync", console_version == ARCHIVEFETCH_VERSION}}).dump(), "application/json"); return; }
+        response.set_content(Json({{"token", token}, {"version", console_version}, {"folderBrowser", true}, {"pairing", true}, {"paired", paired(request)}, {"selfUpdate", self_update}, {"payloadManagerSync", console_version == ARCHIVEFETCH_VERSION}}).dump(), "application/json");
     });
     console.Post("/api/login", [&](const httplib::Request& request, httplib::Response& response) {
         if (Json::parse(request.body).value("password", "") != "console-password") { response.status = 401; response.set_content(R"({"error":"Wrong password"})", "application/json"); return; }
@@ -218,6 +238,15 @@ void console_smoke(httplib::Client& client, const httplib::Headers& headers, con
         uploaded = body.size();
         console_version = ARCHIVEFETCH_VERSION;
         response.set_content(Json({{"ok", true}, {"bytes", body.size()}}).dump(), "application/json");
+    });
+    console.Post("/api/payload-manager/update", [&](const httplib::Request& request, httplib::Response& response, const httplib::ContentReader& content) {
+        if (!guarded(request, response)) return;
+        std::size_t size = 0;
+        content([&](const char*, size_t count) { size += count; return true; });
+        std::lock_guard<std::mutex> guard(mutex);
+        if (pm_fail) { response.status = 502; response.set_content(R"({"error":"Payload Manager unavailable"})", "application/json"); return; }
+        pm_uploaded = size;
+        response.set_content(R"({"replaced":true,"filename":"ArchiveFetch.elf"})", "application/json");
     });
     const int port = console.bind_to_any_port("127.0.0.1");
     require(port > 0, "Stand-in console started");
@@ -322,7 +351,7 @@ void console_smoke(httplib::Client& client, const httplib::Headers& headers, con
         std::ifstream input(root / "consoles.json", std::ios::binary);
         const auto file = Json::parse(input).at("consoles");
         require(file.size() == 1 && file.at(0).at("name") == "Bedroom" && file.dump().find("granted") == std::string::npos, "Consoles are saved without sign-ins");
-        install_smoke(root, port, mutex, console_version, {outside, self_update, loader_down, uploaded});
+        install_smoke(root, port, mutex, console_version, {outside, self_update, loader_down, uploaded, pm_fail, pm_uploaded});
     } catch (...) { console.stop(); listener.join(); throw; }
     console.stop(); listener.join();
 }
