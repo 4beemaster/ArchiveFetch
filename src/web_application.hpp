@@ -354,7 +354,7 @@ public:
         for (const auto& entry : state.queue) {
             auto value = file_json(entry.file);
             value.update({{"id", entry.id}, {"status", queue_status_name(entry.status)}, {"received", entry.received},
-                {"detail", entry.detail}, {"removing", entry.removal_requested}, {"destination", entry.destination.u8string()},
+                {"detail", entry.detail}, {"removing", entry.removal_requested}, {"pausing", entry.pause_requested && entry.status == QueueStatus::Active}, {"destination", entry.destination.u8string()},
                 {"stage", entry.stage}, {"stageDone", entry.stage_done}, {"stageTotal", entry.stage_total}, {"rate", entry.rate}});
             result["queue"].push_back(value);
         }
@@ -1333,12 +1333,13 @@ public:
         static const std::set<std::string> source_actions{"addSource", "selectSource", "selectSources", "sourceTags", "addSourceTags",
             "collectionAdd", "collectionEdit", "collectionRemove", "collectionDelete", "removeSource", "clearSources", "scan", "mergeImport"};
         // The running download queue picks these up itself, so they never wait for it.
-        static const std::set<std::string> queue_actions{"enqueue", "start", "retryQueue", "useLocation"};
+        static const std::set<std::string> queue_actions{"enqueue", "start", "retryQueue", "resumeQueue", "useLocation"};
         if (action == "stop") {
             const auto lane = value.value("lane", "");
             if (lane == "scan") model.cancel_scan(); else if (lane == "downloads") model.cancel_downloads(); else model.cancel();
         }
         else if (action == "removeQueue") model.remove_entry(value.at("id").get<std::uint64_t>());
+        else if (action == "pauseQueue") model.pause_entry(value.at("id").get<std::uint64_t>());
         else if (action == "clearVerified") model.clear_finished();
         else if (action == "hideExtension" || action == "showExtension") return hide_extension(value.at("extension").get<std::string>(), action == "hideExtension");
         else if (action == "mergeExport") return merge_export(value);
@@ -1396,9 +1397,11 @@ public:
             else if (action == "clearSources") model.restore_sources({});
             else if (action == "scan") model.scan_selected_sources(config);
             else if (action == "start") start_downloads();
-            else if (action == "retryQueue") {
+            else if (action == "retryQueue" || action == "resumeQueue") {
                 const auto id = value.at("id").get<std::uint64_t>();
-                if (!id) throw std::runtime_error("Choose a failed download to retry");
+                const auto expected = action == "resumeQueue" ? QueueStatus::Paused : QueueStatus::Failed;
+                if (!id || std::none_of(state.queue.begin(), state.queue.end(), [&](const QueueEntry& entry) { return entry.id == id && entry.status == expected; }))
+                    throw std::runtime_error(action == "resumeQueue" ? "Choose a paused download to resume" : "Choose a failed download to retry");
                 start_downloads(id);
             }
             else if (action == "export") model.export_files(config.output_dir);

@@ -592,21 +592,39 @@ void GuiModel::clear_finished() {
     }), queue.end());
 }
 
+void GuiModel::pause_entry(std::uint64_t id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto entry = std::find_if(state_.queue.begin(), state_.queue.end(), [id](const QueueEntry& queued) { return queued.id == id; });
+    if (entry == state_.queue.end() || entry->removal_requested ||
+        (entry->status != QueueStatus::Pending && entry->status != QueueStatus::Active))
+        throw std::runtime_error("Download is no longer available to pause");
+    if (entry->stage == "Extracting")
+        throw std::runtime_error("This file has finished downloading and is being extracted");
+    entry->pause_requested = true;
+    if (entry->status == QueueStatus::Pending) {
+        entry->status = QueueStatus::Paused;
+        entry->detail = "Paused. Partial download kept; choose Resume to continue.";
+        if (!state_.downloading) state_.notice = "Download paused. Choose Resume to continue.";
+    } else entry->detail = "Pausing; keeping partial download";
+    entry->rate = 0;
+}
+
 void GuiModel::start_downloads(Config config, Download download, std::uint64_t retry_id) {
     auto current = snapshot();
     if (!current.loaded) return;
     if (retry_id) {
         auto entry = std::find_if(current.queue.begin(), current.queue.end(), [retry_id](const QueueEntry& queued) { return queued.id == retry_id; });
-        if (entry == current.queue.end() || entry->status != QueueStatus::Failed)
-            throw std::runtime_error("Failed download is no longer available for retry");
+        if (entry == current.queue.end() || (entry->status != QueueStatus::Failed && entry->status != QueueStatus::Paused))
+            throw std::runtime_error("Download is no longer available to retry or resume");
     }
     if (current.downloading) {
         // The running queue picks up new entries itself; a retried one gets a new id so it is picked up too.
         if (!retry_id) return;
         std::lock_guard<std::mutex> lock(mutex_);
         auto entry = std::find_if(state_.queue.begin(), state_.queue.end(), [retry_id](const QueueEntry& queued) { return queued.id == retry_id; });
-        if (entry != state_.queue.end() && entry->status == QueueStatus::Failed) {
+        if (entry != state_.queue.end() && (entry->status == QueueStatus::Failed || entry->status == QueueStatus::Paused)) {
             entry->status = QueueStatus::Pending;
+            entry->pause_requested = false;
             entry->detail.clear();
             entry->id = next_queue_id_++;
         }
@@ -615,7 +633,7 @@ void GuiModel::start_downloads(Config config, Download download, std::uint64_t r
     if (config.download_dir.empty()) throw std::runtime_error("Choose a download directory.");
     config.s3.authorization();
     if (std::none_of(current.queue.begin(), current.queue.end(), [retry_id](const QueueEntry& entry) {
-            return entry.status != QueueStatus::Verified && (!retry_id || entry.id == retry_id);
+            return entry.status != QueueStatus::Verified && (!entry.pause_requested || retry_id == entry.id) && (!retry_id || entry.id == retry_id);
         })) return;
     config.download_dir = std::filesystem::weakly_canonical(std::filesystem::absolute(config.download_dir));
     std::uint64_t first_new_id = 0;
@@ -625,6 +643,7 @@ void GuiModel::start_downloads(Config config, Download download, std::uint64_t r
         // Known before the run starts, so removing a pending entry also removes a partial file left by an earlier run.
         for (auto& entry : state_.queue) {
             if (entry.status == QueueStatus::Verified || (retry_id && entry.id != retry_id)) continue;
+            if (retry_id == entry.id) entry.pause_requested = false;
             if (entry.destination.empty()) entry.destination = config.download_dir;
             entry.partial_path = entry.destination / std::filesystem::u8path(entry.file.name).filename();
             entry.partial_path += ".part";
@@ -640,7 +659,7 @@ void GuiModel::start_downloads(Config config, Download download, std::uint64_t r
                 std::lock_guard<std::mutex> lock(mutex_);
                 // Queue order, including entries added while this runs; a retry run also takes newly added ones.
                 auto next = std::find_if(state_.queue.begin(), state_.queue.end(), [&](const QueueEntry& entry) {
-                    return entry.status != QueueStatus::Verified && !attempted.count(entry.id) &&
+                    return entry.status != QueueStatus::Verified && !entry.pause_requested && !attempted.count(entry.id) &&
                         (!retry_id || entry.id == retry_id || entry.id >= first_new_id);
                 });
                 if (next == state_.queue.end()) break;
@@ -663,7 +682,7 @@ void GuiModel::start_downloads(Config config, Download download, std::uint64_t r
                 if (cancelled_) return true;
                 std::lock_guard<std::mutex> lock(mutex_);
                 auto entry = find_entry();
-                return entry == state_.queue.end() || entry->removal_requested;
+                return entry == state_.queue.end() || entry->removal_requested || entry->pause_requested;
             };
             // Resumed bytes are not counted: the first report only sets the starting point.
             struct Speed { std::chrono::steady_clock::time_point at; std::uint64_t bytes = 0; bool started = false; double rate = 0; };
@@ -690,6 +709,7 @@ void GuiModel::start_downloads(Config config, Download download, std::uint64_t r
             hooks.stage = [this, find_entry](const std::string& stage, std::uint64_t done, std::uint64_t total) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 auto entry = find_entry();
+                if (entry != state_.queue.end() && entry->pause_requested) throw OperationCancelled();
                 if (entry != state_.queue.end()) { entry->stage = stage; entry->stage_done = done; entry->stage_total = total; entry->rate = 0; }
             };
             bool stopped = false;
@@ -716,14 +736,22 @@ void GuiModel::start_downloads(Config config, Download download, std::uint64_t r
                         } catch (const std::exception& error) {
                             entry->status = QueueStatus::Failed;
                             entry->removal_requested = false;
+                            entry->pause_requested = false;
                             entry->detail = error.what();
                             failed = true;
                         }
                         stopped = false;
-                    } else if (stopped) entry->status = QueueStatus::Paused;
+                    } else if (stopped) {
+                        entry->status = QueueStatus::Paused;
+                        if (entry->pause_requested) {
+                            entry->detail = "Paused. Partial download kept; choose Resume to continue.";
+                            stopped = false;
+                        }
+                    }
                     else if (!failure.empty()) {
                         failed = true;
                         entry->status = QueueStatus::Failed;
+                        entry->pause_requested = false;
                         entry->detail = failure;
                     } else {
                         entry->status = QueueStatus::Verified;
@@ -739,7 +767,8 @@ void GuiModel::start_downloads(Config config, Download download, std::uint64_t r
             return entry.status == QueueStatus::Verified;
         }), state_.queue.end());
         failed = failed || std::any_of(state_.queue.begin(), state_.queue.end(), [](const QueueEntry& entry) { return entry.status == QueueStatus::Failed; });
-        state_.notice = failed ? "Queue finished with errors." : "Queue complete. All selected files verified.";
+        const bool paused = std::any_of(state_.queue.begin(), state_.queue.end(), [](const QueueEntry& entry) { return entry.status == QueueStatus::Paused; });
+        state_.notice = failed ? "Queue finished with errors." : paused ? "Remaining downloads are paused. Choose Resume to continue." : "Queue complete. All selected files verified.";
     });
 }
 

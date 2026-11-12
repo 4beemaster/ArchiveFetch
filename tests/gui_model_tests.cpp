@@ -253,6 +253,107 @@ int main() {
                 std::filesystem::remove(live_config.download_dir / "Beta.chd.part");
                 live.remove(0);
         }
+        {
+            GuiModel pausable;
+            auto pause_config = config;
+            pause_config.sources = {"https://archive.org/details/example"};
+            pause_config.download_dir = directory / "individual-pause";
+            std::filesystem::create_directories(pause_config.download_dir);
+            pausable.start_scan(pause_config, [](const std::string&) {
+                return "<files><file name='Alpha.chd'><size>3</size><md5>900150983cd24fb0d6963f7d28e17f72</md5></file>"
+                       "<file name='Beta.chd'><size>3</size><md5>900150983cd24fb0d6963f7d28e17f72</md5></file>"
+                       "<file name='Gamma.chd'><size>3</size><md5>900150983cd24fb0d6963f7d28e17f72</md5></file></files>";
+            });
+            pausable.wait();
+            pausable.enqueue({0, 1, 2});
+            const auto alpha_id = pausable.snapshot().queue[0].id;
+            const auto beta_id = pausable.snapshot().queue[1].id;
+            pausable.pause_entry(beta_id);
+            require(pausable.snapshot().queue[1].status == QueueStatus::Paused, "Queued download can be held before starting");
+            rejects([&] { pausable.pause_entry(beta_id); });
+            rejects([&] { pausable.pause_entry(0); });
+            std::atomic<bool> alpha_started{false}, gamma_started{false}, release_gamma{false};
+            int alpha_attempts = 0, beta_attempts = 0;
+            auto transfer = [&](const File& file, const std::filesystem::path& folder, bool overwrite, const TransferHooks& hooks) {
+                if (file.name == "Alpha.chd" && ++alpha_attempts == 1) {
+                    { std::ofstream output(folder / "Alpha.chd.part"); output << "a"; }
+                    hooks.progress(1, 3);
+                    alpha_started = true;
+                    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                    while (!hooks.cancelled() && std::chrono::steady_clock::now() < deadline)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    if (!hooks.cancelled()) throw std::runtime_error("Pause was not delivered to transfer hooks");
+                    throw OperationCancelled();
+                }
+                if (file.name == "Gamma.chd") {
+                    hooks.stage("Extracting", 0, 3);
+                    gamma_started = true;
+                    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                    while (!release_gamma && !hooks.cancelled() && std::chrono::steady_clock::now() < deadline)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    if (!release_gamma) throw std::runtime_error("Next queued transfer did not get released");
+                }
+                if (file.name == "Alpha.chd") {
+                    require(std::filesystem::file_size(folder / "Alpha.chd.part") == 1, "Resume keeps previously received bytes");
+                    std::ofstream output(folder / "Alpha.chd.part", std::ios::app); output << "bc";
+                } else {
+                    if (file.name == "Beta.chd") ++beta_attempts;
+                    std::ofstream output(folder / (file.name + ".part")); output << "abc";
+                }
+                Http http({}, hooks);
+                http.download(file, folder, overwrite);
+            };
+            const auto await = [](const std::atomic<bool>& flag) {
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                while (!flag && std::chrono::steady_clock::now() < deadline)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                require(flag, "Pause fixture transfer did not start");
+            };
+            pausable.start_downloads(pause_config, transfer);
+            await(alpha_started);
+            pausable.pause_entry(alpha_id);
+            await(gamma_started);
+            rejects([&] { pausable.pause_entry(pausable.snapshot().queue[2].id); });
+            auto paused = pausable.snapshot();
+            require(paused.downloading && paused.queue[0].status == QueueStatus::Paused && paused.queue[0].received == 1 &&
+                paused.queue[0].rate == 0 && paused.queue[1].status == QueueStatus::Paused,
+                "Pausing active transfer preserves progress and continues other non-paused files");
+            pausable.start_downloads(pause_config, transfer, alpha_id);
+            release_gamma = true;
+            pausable.wait();
+            paused = pausable.snapshot();
+            require(alpha_attempts == 2 && beta_attempts == 0 && paused.queue.size() == 1 && paused.queue[0].id == beta_id &&
+                paused.notice.find("paused") != std::string::npos, "Resume joins running queue without resuming unrelated held file");
+            pausable.start_downloads(pause_config, transfer);
+            pausable.wait();
+            require(beta_attempts == 0 && pausable.snapshot().queue[0].status == QueueStatus::Paused,
+                "Global Start leaves explicitly paused files held");
+            pausable.start_downloads(pause_config, transfer, beta_id);
+            pausable.wait();
+            require(beta_attempts == 1 && pausable.snapshot().queue.empty(), "Resume starts selected held file while idle");
+            rejects([&] { pausable.start_downloads(pause_config, transfer, beta_id); });
+            pausable.enqueue({0});
+            pausable.pause_entry(pausable.snapshot().queue[0].id);
+            pausable.remove(0);
+            require(pausable.snapshot().queue.empty() && std::filesystem::exists(pause_config.download_dir / "Alpha.chd"),
+                "Removing paused entry never deletes verified final output");
+            pausable.enqueue({0, 1});
+            pausable.pause_entry(pausable.snapshot().queue[1].id);
+            pausable.start_downloads(pause_config, [](const File&, const std::filesystem::path&, bool, const TransferHooks&) {
+                throw OperationCancelled();
+            });
+            pausable.wait();
+            require(pausable.snapshot().queue[0].status == QueueStatus::Paused && !pausable.snapshot().queue[0].pause_requested,
+                "Queue-wide interruption remains distinct from an individual hold");
+            int resumed_after_stop = 0;
+            pausable.start_downloads(pause_config, [&](const File& file, const std::filesystem::path&, bool, const TransferHooks&) {
+                require(file.name == "Alpha.chd", "Start must not release another file's individual hold");
+                ++resumed_after_stop;
+            });
+            pausable.wait();
+            require(resumed_after_stop == 1 && pausable.snapshot().queue.size() == 1 &&
+                pausable.snapshot().queue[0].status == QueueStatus::Paused, "Start still resumes Stop-interrupted files only");
+        }
         model.enqueue({0}, true);
         require(model.snapshot().queue[0].overwrite && model.snapshot().queue[0].status == QueueStatus::Pending,
             "Explicit overwrite requeues an already verified entry");

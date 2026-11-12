@@ -554,7 +554,20 @@ void web_smoke(httplib::Server& server, WebApplication& application, int port, c
     result = send({{"action", "enqueue"}, {"indices", {1}}, {"revision", revision}});
     require(result && result->status == 200 && application.model.snapshot().queue.size() == 1, "Queue uses real model");
     auto id = application.model.snapshot().queue.front().id;
+    result = send({{"action", "resumeQueue"}, {"id", id}});
+    require(result && result->status == 400, "Resume rejects an entry that is not paused");
+    result = send({{"action", "pauseQueue"}, {"id", id}});
+    require(result && result->status == 200 && application.model.snapshot().queue.front().status == QueueStatus::Paused, "Per-file pause command accepted");
+    result = client.Get("/api/state", headers);
+    require(result && Json::parse(result->body).at("queue").at(0).at("status") == "Paused" &&
+        Json::parse(result->body).at("queue").at(0).at("pausing") == false, "Paused state is exposed to every platform UI");
+    result = send({{"action", "retryQueue"}, {"id", id}});
+    require(result && result->status == 400, "Paused entry needs Resume, not failure Retry");
+    result = send({{"action", "pauseQueue"}, {"id", id + 10000}});
+    require(result && result->status == 400, "Stale pause ID rejected");
     result = send({{"action", "removeQueue"}, {"id", id}}); require(result && result->status == 200 && application.model.snapshot().queue.empty(), "Stable queue removal");
+    result = send({{"action", "resumeQueue"}, {"id", id}});
+    require(result && result->status == 400, "Stale resume ID rejected");
     result = send({{"action", "enqueue"}, {"indices", {1}}, {"revision", revision}});
     require(result && result->status == 200, "Retry fixture queued");
     application.model.start_downloads(application.config, [](const File&, const std::filesystem::path&, bool, const TransferHooks&) { throw std::runtime_error("Retry fixture failure"); });
@@ -564,6 +577,8 @@ void web_smoke(httplib::Server& server, WebApplication& application, int port, c
         std::filesystem::create_directories(directory);
         std::ofstream output(directory / std::filesystem::u8path(file.name).filename(), std::ios::binary); output << "abc";
     };
+    result = send({{"action", "resumeQueue"}, {"id", retry_id}});
+    require(result && result->status == 400, "Failed entry needs Retry, not Resume");
     result = send({{"action", "retryQueue"}, {"id", retry_id}});
     require(result && result->status == 200, "Failed entry retry accepted");
     application.model.wait();
@@ -572,6 +587,18 @@ void web_smoke(httplib::Server& server, WebApplication& application, int port, c
     require(result && result->status == 400, "Stale retry ID rejected");
     result = send({{"action", "retryQueue"}, {"id", 0}});
     require(result && result->status == 400, "Retry requires a specific queue ID");
+    application.model.enqueue({1}, true);
+    const auto resume_id = application.model.snapshot().queue.front().id;
+    result = send({{"action", "pauseQueue"}, {"id", resume_id}});
+    require(result && result->status == 200, "Resume fixture paused");
+    result = send({{"action", "start"}});
+    application.model.wait();
+    require(result && result->status == 200 && application.model.snapshot().queue.front().status == QueueStatus::Paused,
+        "Start API leaves individual holds intact");
+    result = send({{"action", "resumeQueue"}, {"id", resume_id}});
+    require(result && result->status == 200, "Resume API starts a paused download");
+    application.model.wait();
+    require(application.model.snapshot().queue.empty(), "Resume API completes only selected paused download");
     result = send({{"action", "forget"}}); require(result && result->status == 200, "Session credentials cleared");
     application.persist();
     WebApplication restored(application.root);

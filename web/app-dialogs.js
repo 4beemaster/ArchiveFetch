@@ -182,6 +182,10 @@ function renderQueue() {
     settings.classList.add('s3-settings'); file.append(settings);
     const retry = iconButton('play', `Retry download ${entry.name}`, () => run('retryQueue', { id: entry.id }));
     retry.classList.add('retry-download'); file.append(retry);
+    const pause = iconButton('pause', `Pause download ${entry.name}`, () => run('pauseQueue', { id: entry.id }));
+    pause.classList.add('pause-download'); file.append(pause);
+    const resume = iconButton('play', `Resume download ${entry.name}`, () => run('resumeQueue', { id: entry.id }));
+    resume.classList.add('resume-download'); file.append(resume);
     const status = node('div', undefined, 'queue-status'); status.append(node('span', '', 'badge'), node('span', '', 'numbers'));
     row.append(file, status, iconButton('trash', `Remove download ${entry.name}`, () => run('removeQueue', { id: entry.id })));
     state.queueNodes.set(entry.id, row); $('queue-list').append(row);
@@ -194,7 +198,11 @@ function renderQueue() {
     settings.hidden = entry.status !== 'Failed' || !entry.detail.includes('Archive.org denied access:'); settings.disabled = state.pending;
     const retry = row.querySelector('.retry-download');
     retry.hidden = entry.status !== 'Failed'; retry.disabled = queueBusy() || entry.removing;
-    const badge = row.querySelector('.badge'); badge.textContent = entry.removing ? 'Removing' : staged !== null ? entry.stage : entry.status;
+    const pause = row.querySelector('.pause-download');
+    pause.hidden = !['Queued', 'Transferring / verifying'].includes(entry.status) || entry.stage === 'Extracting'; pause.disabled = state.pending || entry.removing || entry.pausing;
+    const resume = row.querySelector('.resume-download');
+    resume.hidden = entry.status !== 'Paused'; resume.disabled = queueBusy() || entry.removing;
+    const badge = row.querySelector('.badge'); badge.textContent = entry.removing ? 'Removing' : entry.pausing ? 'Pausing' : staged !== null ? entry.stage : entry.status;
     badge.className = `badge ${entry.status === 'Failed' ? 'failed' : 'warn'}`;
     row.querySelector('.numbers').textContent = staged !== null
       ? `${Math.floor(staged * 100)}%${entry.stageTotal ? ` · ${bytes(entry.stageDone)} / ${bytes(entry.stageTotal)}` : ''}`

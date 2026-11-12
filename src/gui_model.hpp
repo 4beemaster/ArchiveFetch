@@ -25,6 +25,7 @@ struct QueueEntry {
     std::uint64_t stage_done = 0, stage_total = 0;
     // Bytes per second while transferring, 0 otherwise.
     std::uint64_t rate = 0;
+    bool pause_requested = false;
 };
 
 struct SourceEntry {
@@ -78,6 +79,7 @@ public:
     void enqueue(const std::vector<std::size_t>& indices, bool overwrite = false, std::filesystem::path destination = {});
     void remove(std::size_t index);
     void remove_entry(std::uint64_t id);
+    void pause_entry(std::uint64_t id);
     void clear_finished();
     using Download = std::function<void(const File&, const std::filesystem::path&, bool, const TransferHooks&)>;
     void start_downloads(Config config, Download download = {}, std::uint64_t retry_id = 0);
