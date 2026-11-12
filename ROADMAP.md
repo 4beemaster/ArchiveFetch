@@ -12,10 +12,11 @@ Working plan; versions and details can still change.
 - **0.7.1**: fixes: Clean library with hidden file types, deleting extracted folders on the PS5 (with the real space freed), extracted downloads recognized in every download location, a simpler Clean library popup (delete downloads and/or remove entries, with a second confirmation), and no local build paths in the Android app.
 - **0.7.2**: console updates go through ArchiveFetch on port 8890, which hands the payload to the console's own loader, so the loader port no longer has to be reachable from other devices; a banner shows when a console runs an older or newer ArchiveFetch than the app; Downloads shows each transfer's speed and time left; **Connections per download** (1 to 8, default 4, now also on Windows and Android) with refused parts retrying on their own; request bodies other than updates are limited to 1 MB.
 - **0.7.3**: app-driven console updates also replace the existing ArchiveFetch copy through itsPLK Payload Manager's own API, preserving its filename, slot and boot list. Compatible with Payload Manager 0.6.3's upload guard. Failed synchronization keeps the running update and shows a warning with Retry update. Windows gains a per-user installer with data-preserving manual upgrades.
+- **0.8.0**: manual GitHub release checks with beta-build opt-in, SHA256-verified downloads and explicit installation through the Windows/Android system installers or the PS5's local loader. PS5 updates preserve the existing Payload Manager filename, slot and boot list. Individual-download Pause/Resume retains partial data and lets the rest of the queue continue; explicitly paused files wait for Resume, while queue-wide Stop/Start behavior is unchanged. Extraction itself is not pausable. No automatic background checks or unattended installation.
 
 ## Next
 
-- **0.8.0-beta.4** (acceptance testing): adds individual-download Pause/Resume while retaining partial data and continuing the rest of the queue. Explicitly paused files wait for Resume; Stop/Start retains its queue-wide behavior. Extraction is not pausable. Includes beta.2's verified GitHub updater, tested end-to-end through beta.3; beta.4 receives another Windows, Android-emulator and real-PS5 upgrade/pause regression cycle before review. No automatic background checks or unattended installation. PS5 updates preserve the existing Payload Manager filename, slot and boot list. Development stops for review at beta.4. Android release signing remains separate future work.
+- Android release signing.
 
 ## 1.0.0
 

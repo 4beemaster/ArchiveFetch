@@ -1,6 +1,6 @@
 # ArchiveFetch
 
-Current development version: **0.8.0-beta.4**, the same for the Windows, Android and PS5 apps. It lives in the `VERSION` file, which every build reads; the apps show it next to the ArchiveFetch name. Android's version code is derived from it (0.6.0-beta.1 = 6001, the 0.6.0 release = 6099) so each build installs over the earlier ones. Versions below 1.0 indicate an evolving, not-yet-stable project.
+Current release: **0.8.0**, the same for the Windows, Android and PS5 apps. It lives in the `VERSION` file, which every build reads; the apps show it next to the ArchiveFetch name. Android's version code is derived from it (0.6.0-beta.1 = 6001, the 0.6.0 release = 6099) so each build installs over the earlier ones. Versions below 1.0 indicate an evolving, not-yet-stable project.
 
 A Windows/Android HTML interface, a PS5 app served to the console browser and local network, desktop command-line client, and legacy headless PS5 ELF payload for combining Internet Archive file manifests and downloading explicitly selected files. The interfaces reuse the native catalog and download worker model.
 
@@ -82,7 +82,7 @@ Microsoft Edge WebView2 Runtime must be installed. Setup checks for it and, if m
 To build setup from a validated portable package (EXE, runtime DLLs, web assets, licenses and matching `payload` folder), install Inno Setup 6 or 7 and run:
 
 ```powershell
-.\packaging\windows\build-installer.ps1 -PackageDir .\build-windows-portable\ArchiveFetch-0.8.0-beta.4-windows-x64
+.\packaging\windows\build-installer.ps1 -PackageDir .\build-windows-portable\ArchiveFetch-0.8.0-windows-x64
 ```
 
 The script requires the bundled payload version and hash to match the current PS5 build. Privacy-scan all staged files and the resulting installer before distributing either. The stable setup application ID keeps beta/release upgrades in the same per-user installation.
@@ -171,7 +171,7 @@ Starting with 0.7.3, an app update also replaces the console's existing ArchiveF
 
 ## PS5 App
 
-Version **0.8.0-beta.4**. ArchiveFetch runs on a jailbroken PS5 as a payload ELF and serves its web interface on port **8890**, to the console's own browser and to phones or computers on the same network. Verified on firmware 13.60.
+Version **0.8.0**. ArchiveFetch runs on a jailbroken PS5 as a payload ELF and serves its web interface on port **8890**, to the console's own browser and to phones or computers on the same network. Verified on firmware 13.60.
 
 ### Install and open
 
