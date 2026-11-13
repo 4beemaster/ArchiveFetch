@@ -120,8 +120,12 @@ public final class MainActivity extends Activity {
                 }
                 String action = data == null ? "" : data.optString("action");
                 if ("/api/command".equals(value.getString("path")) && "chooseDirectory".equals(action)) {
+                    String purpose = data.optString("purpose", "destination-input");
+                    if (!"destination-input".equals(purpose) && !"location-path".equals(purpose)) {
+                        respond(reply, id, null, "Android export folders are managed privately by the app"); return;
+                    }
                     JSONObject currentState = new JSONObject(NativeBridge.request("/api/state", "{}", value.optString("token")));
-                    if (currentState.optJSONArray("queue") != null && currentState.getJSONArray("queue").length() > 0) {
+                    if ("destination-input".equals(purpose) && currentState.optJSONArray("queue") != null && currentState.getJSONArray("queue").length() > 0) {
                         respond(reply, id, null, "Finish or remove queued downloads before changing the destination folder"); return;
                     }
                     if (!currentState.optBoolean("busy", true)) {

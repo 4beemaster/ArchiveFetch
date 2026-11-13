@@ -16,6 +16,7 @@ struct Progress {
 enum class Result { Done, Failed, Cancelled };
 
 struct Options {
+    // UTF-8 filesystem paths, including on Windows.
     std::string archive, destination;
     std::function<bool()> cancelled;
     // Called once the destination folder exists, then after every block and file; the caller throttles.

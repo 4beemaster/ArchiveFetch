@@ -3,6 +3,8 @@
 #include <curl/curl.h>
 #include <openssl/err.h>
 #include <openssl/x509.h>
+#include <openssl/evp.h>
+#include "native_extraction.hpp"
 
 namespace {
 std::mutex android_mutex;
@@ -17,6 +19,7 @@ thread_local JNIEnv* android_environment = nullptr;
 jclass android_bridge_class = nullptr;
 JavaVM* android_vm = nullptr;
 thread_local const TransferHooks* android_copy_hooks = nullptr;
+thread_local bool android_overwrite = false;
 
 class AndroidThread {
 public:
@@ -62,13 +65,46 @@ std::string credential_call(const char* method, const std::string* value = nullp
 }
 
 Json android_storage(const Json& request) {
+    AndroidThread thread;
     auto text = request.dump(-1, ' ', true);
     auto result = Json::parse(credential_call("storageRequest", &text));
-    if (result.contains("error")) throw std::runtime_error(result.at("error").get<std::string>());
+    const bool copy_status = request.at("action") == "status" && result.contains("path") && result.contains("status") &&
+        (result.at("status") == "Location unavailable" || result.at("status") == "Missing" || result.at("status") == "Changed");
+    if (result.contains("error") && !copy_status) throw std::runtime_error(result.at("error").get<std::string>());
     return result;
 }
 
 std::string android_tree() { return android_storage({{"action", "tree"}}).at("tree").get<std::string>(); }
+
+class AndroidCopyScope {
+public:
+    explicit AndroidCopyScope(const TransferHooks& hooks) { android_copy_hooks = &hooks; }
+    ~AndroidCopyScope() { android_copy_hooks = nullptr; }
+};
+
+std::filesystem::path android_staging() { return android_downloads / ".staging"; }
+
+std::filesystem::path android_staging(const std::filesystem::path& destination, const std::filesystem::path& downloads) {
+    const auto text = destination.u8string();
+    unsigned char bytes[EVP_MAX_MD_SIZE];
+    unsigned int length = 0;
+    if (EVP_Digest(text.data(), text.size(), bytes, &length, EVP_sha256(), nullptr) != 1 || length != 32)
+        throw std::runtime_error("Cannot identify private download staging");
+    constexpr char digits[] = "0123456789abcdef";
+    std::string digest;
+    digest.reserve(length * 2);
+    for (unsigned int index = 0; index < length; ++index) {
+        digest += digits[bytes[index] >> 4]; digest += digits[bytes[index] & 15];
+    }
+    return downloads / ".staging" / digest;
+}
+
+std::filesystem::path android_staging(const std::filesystem::path& destination) { return android_staging(destination, android_downloads); }
+
+void android_remove_staging(const File& file, const std::filesystem::path& destination) {
+    const auto archive = download_target(android_staging(destination), file);
+    std::filesystem::remove(archive);
+}
 
 void android_trust_diagnostics() {
     ERR_clear_error();
@@ -108,6 +144,29 @@ Java_org_archivecatalog_app_NativeBridge_copyCancelled(JNIEnv*, jclass) {
     catch (...) { return JNI_TRUE; }
 }
 
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_archivecatalog_app_NativeBridge_extractPrivate(JNIEnv* environment, jclass, jstring archive, jstring folder, jboolean cancel) {
+    std::lock_guard<std::mutex> guard(android_mutex);
+    android_environment = environment;
+    try {
+        if (!android_app || android_app->model.snapshot().busy) throw std::runtime_error("Stop current work before extracting");
+        const auto source = std::filesystem::weakly_canonical(std::filesystem::u8path(java_text(environment, archive)));
+        const auto destination = std::filesystem::weakly_canonical(std::filesystem::u8path(java_text(environment, folder)));
+        const auto staging = std::filesystem::weakly_canonical(android_staging());
+        auto contained = [&staging](const std::filesystem::path& path) {
+            const auto relative = path.lexically_relative(staging);
+            return !relative.empty() && !relative.is_absolute() && *relative.begin() != ".." && path != staging;
+        };
+        if (!contained(source) || !contained(destination)) throw std::runtime_error("Extraction must remain in private staging");
+        const auto result = native_extract(source, destination, [cancel] { return cancel == JNI_TRUE; }, {}, {});
+        return environment->NewStringUTF(Json({{"result", result.result == ExtractOutcome::Result::Done ? "Done" :
+            result.result == ExtractOutcome::Result::Cancelled ? "Cancelled" : "Failed"}, {"error", result.error},
+            {"files", result.files}, {"unsafe", result.unsafe}, {"links", result.links}}).dump(-1, ' ', true).c_str());
+    } catch (const std::exception& failure) {
+        return environment->NewStringUTF(Json({{"error", failure.what()}}).dump(-1, ' ', true).c_str());
+    }
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_org_archivecatalog_app_NativeBridge_copyProgress(JNIEnv*, jclass, jlong received, jlong total) {
     if (android_copy_hooks && android_copy_hooks->progress) android_copy_hooks->progress(received, total);
@@ -137,46 +196,143 @@ Java_org_archivecatalog_app_NativeBridge_start(JNIEnv* environment, jclass type,
                 [](const std::string& text) { return credential_call("unprotectText", &text); },
                 credential_call("deviceName")});
             android_consoles->payload_dir = android_root / "payload";
-            android_app->config.download_dir = android_downloads;
+            android_storage({{"action", "configure"}, {"private", android_downloads.u8string()}});
+            android_app->platform_storage = android_storage;
+            android_app->platform_partial_path = [downloads = android_downloads](const File& file, const std::filesystem::path& destination) {
+                auto partial = download_target(android_staging(destination, downloads), file); partial += ".part";
+                return partial;
+            };
+            if (android_app->download_state_writable) {
+                auto next = android_app->download_state;
+                for (auto& location : next["locations"]) if (!next.contains("platformStorage") && location.at("id") == "default" &&
+                    (!std::filesystem::exists(android_root / "download-locations.json") || location.at("path") == android_downloads.u8string()))
+                    location["path"] = android_tree();
+                next["platformStorage"] = 1;
+                android_app->commit_download_state(std::move(next));
+            }
+            android_app->config.download_dir = std::filesystem::u8path(find_location(android_app->download_state,
+                android_app->download_state.at("default")).at("path").get<std::string>());
             android_app->config.output_dir = android_root / "exports";
             android_app->config.ca_bundle = android_ca.u8string();
-            android_app->destination_exists = [](const File& file) {
-                auto name = std::filesystem::u8path(file.name).filename().u8string();
-                return android_tree().empty() ? std::filesystem::exists(android_downloads / std::filesystem::u8path(name)) :
-                    android_storage({{"action", "exists"}, {"name", name}}).at("exists").get<bool>();
-            };
+            android_app->extract = native_extract;
             android_app->download = [app = android_app.get()](const File& file, const std::filesystem::path& directory, bool overwrite, const TransferHooks& hooks) {
                 AndroidThread thread;
-                bool selected = !android_tree().empty();
-                std::cerr << "[download] Starting; destination=" << (selected ? "selected folder" : "app-specific storage")
-                          << " expected_bytes=" << file.size << " overwrite=" << (overwrite ? "yes" : "no") << '\n';
+                android_overwrite = overwrite;
+                android_storage({{"action", "validate"}, {"tree", directory.u8string()}});
+                const auto staging = android_staging(directory);
+                std::filesystem::create_directories(staging);
                 Http http(app->config.ca_bundle, hooks, app->config.s3, app->config.download_connections);
                 bool staged = false;
-                if (selected) {
-                    auto target = download_target(directory, file);
-                    if (std::filesystem::exists(target)) {
-                        try { verify_file(file, target, hooks); staged = true; }
-                        catch (const OperationCancelled&) { throw; }
-                        catch (const std::exception&) { }
-                    }
+                auto target = download_target(staging, file);
+                if (std::filesystem::exists(target)) {
+                    try { verify_file(file, target, hooks); staged = true; }
+                    catch (const OperationCancelled&) { throw; }
+                    catch (const std::exception& failure) { std::cerr << "[download] Staging verification failed: " << failure.what() << '\n'; }
                 }
-                if (!staged) http.download(file, directory, selected || overwrite);
-                if (!selected) { std::cerr << "[download] Verified in app-specific storage\n"; return; }
-                auto name = std::filesystem::u8path(file.name).filename();
-                auto path = directory / name;
-                android_copy_hooks = &hooks;
-                std::cerr << "[storage] Publishing verified staging file to selected folder\n";
+                if (!staged) http.download(file, staging, true);
+            };
+            android_app->platform_record_download = [app = android_app.get()](const File& file, const std::filesystem::path& directory, const TransferHooks& hooks) {
+                AndroidCopyScope copy(hooks);
+                if (hooks.status) hooks.status("Publishing verified download");
+                Json previous;
+                {
+                    std::lock_guard<std::mutex> guard(app->download_state_mutex);
+                    for (const auto& entry : app->download_state.at("records")) if (entry.contains("storage") &&
+                        entry.at("storage").at("tree") == directory.u8string() && entry.at("storage").contains("archive") &&
+                        entry.at("storage").at("archive").at("name") == std::filesystem::u8path(file.name).filename().u8string()) previous = entry;
+                }
+                if (!previous.is_null() && previous.at("item") == file.item && previous.at("name") == file.name && previous.at("size") == file.size && !android_overwrite &&
+                    android_storage({{"action", "status"}, {"record", previous}}).at("status") == "Downloaded" &&
+                    android_storage({{"action", "matchesStaging"}, {"record", previous}, {"path", download_target(android_staging(directory), file).u8string()}}).at("matches").get<bool>()) return;
+                Json record;
                 try {
-                    android_storage({{"action", "publish"}, {"path", path.u8string()}, {"name", name.u8string()}, {"size", file.size}, {"overwrite", overwrite}});
-                    android_copy_hooks = nullptr;
-                } catch (...) {
-                    android_copy_hooks = nullptr;
+                    record = android_storage({{"action", "publish"}, {"tree", directory.u8string()}, {"previous", previous}, {"overwrite", android_overwrite},
+                        {"path", download_target(android_staging(directory), file).u8string()},
+                        {"name", std::filesystem::u8path(file.name).filename().u8string()}, {"size", file.size}});
+                } catch (const std::exception&) {
                     if (hooks.cancelled && hooks.cancelled()) throw OperationCancelled();
                     throw;
                 }
-                std::error_code ignored;
-                std::filesystem::remove(path, ignored);
-                std::cerr << "[storage] Publication complete; staging_cleanup_error=" << ignored.value() << '\n';
+                record["item"] = file.item; record["name"] = file.name; record["size"] = file.size;
+                std::lock_guard<std::mutex> guard(app->download_state_mutex);
+                auto next = app->download_state;
+                if (!previous.is_null()) {
+                    auto& records = next["records"];
+                    records.erase(std::remove_if(records.begin(), records.end(), [&](const Json& entry) { return entry.at("path") == previous.at("path"); }), records.end());
+                }
+                next["records"].push_back(record);
+                try {
+                    app->commit_download_state(std::move(next));
+                } catch (const std::exception& failure) {
+                    try { android_storage({{"action", "deleteCopy"}, {"record", record}}); }
+                    catch (const std::exception& rollback) { throw std::runtime_error(std::string(failure.what()) + "; published copy rollback failed: " + rollback.what()); }
+                    throw;
+                }
+            };
+            android_app->platform_extract_after_download = [app = android_app.get()](const File& file, const std::filesystem::path& directory, const TransferHooks& hooks) {
+                AndroidCopyScope copy(hooks);
+                const auto folder_name = archive_folder_name(file.name);
+                bool wanted = app->config.extract_archives;
+                Json record;
+                {
+                    std::lock_guard<std::mutex> guard(app->download_state_mutex);
+                    for (const auto& location : app->download_state.at("locations"))
+                        if (location.at("path") == directory.u8string() && location.value("extract", false)) wanted = true;
+                    for (const auto& entry : app->download_state.at("records"))
+                        if (entry.at("item") == file.item && entry.at("name") == file.name && entry.contains("storage") &&
+                            entry.at("storage").at("tree") == directory.u8string()) record = entry;
+                }
+                if (!wanted || folder_name.empty()) { android_remove_staging(file, directory); return; }
+                { std::lock_guard<std::mutex> guard(app->extraction_mutex); app->extraction_error.clear(); }
+                if (record.is_null()) throw std::runtime_error("Published download record is unavailable");
+                const auto folder = android_staging(directory) / std::filesystem::u8path(folder_name);
+                const auto status = [&hooks](const std::string& text) { if (hooks.status) hooks.status(text); };
+                const auto progress = [&hooks](std::uint64_t done, std::uint64_t total) { if (hooks.stage) hooks.stage("Extracting", done, total); };
+                const std::function<bool()> cancelled = hooks.cancelled ? hooks.cancelled : [] { return false; };
+                const auto outcome = app->extract(download_target(android_staging(directory), file), folder, cancelled, status, progress);
+                if (outcome.result != ExtractOutcome::Result::Done) {
+                    const auto problem = outcome.result == ExtractOutcome::Result::Cancelled ? "Extraction stopped; the archive was kept"
+                        : "Could not extract " + file.name + ": " + outcome.error + ". The archive was kept.";
+                    status(problem);
+                    std::lock_guard<std::mutex> guard(app->extraction_mutex); app->extraction_error = problem;
+                    return;
+                }
+                try {
+                    record = android_storage({{"action", "publishExtracted"}, {"record", record}, {"path", folder.u8string()}, {"name", folder_name}});
+                    {
+                        std::lock_guard<std::mutex> guard(app->download_state_mutex);
+                        auto next = app->download_state;
+                        for (auto& entry : next["records"]) if (entry.at("path") == record.at("path")) entry = record;
+                        try { app->commit_download_state(std::move(next)); }
+                        catch (const std::exception& failure) {
+                            try { android_storage({{"action", "deleteExtraction"}, {"record", record}}); }
+                            catch (const std::exception& rollback) { throw std::runtime_error(std::string(failure.what()) + "; extraction rollback failed: " + rollback.what()); }
+                            throw;
+                        }
+                    }
+                    if (app->config.delete_extracted_archives && !outcome.unsafe && !outcome.links) {
+                        record = android_storage({{"action", "deleteArchive"}, {"record", record}});
+                        std::lock_guard<std::mutex> guard(app->download_state_mutex);
+                        auto next = app->download_state;
+                        for (auto& entry : next["records"]) if (entry.at("path") == record.at("path")) entry = record;
+                        app->commit_download_state(std::move(next));
+                    }
+                    std::error_code removal;
+                    if (!remove_tree(folder, removal)) throw std::runtime_error("Published extraction staging cleanup failed: " + removal.message());
+                    android_remove_staging(file, directory);
+                    status("Extracted " + std::to_string(outcome.files) + " files to " + folder_name);
+                    if (outcome.unsafe || outcome.links) {
+                        std::lock_guard<std::mutex> guard(app->extraction_mutex);
+                        app->extraction_error = "Unsafe names or links were skipped; the archive was kept.";
+                    }
+                } catch (const std::exception& failure) {
+                    std::error_code removal;
+                    if (real_directory(folder) && !remove_tree(folder, removal))
+                        std::cerr << "[storage] Extraction staging rollback failed: " << removal.message() << '\n';
+                    std::lock_guard<std::mutex> guard(app->extraction_mutex);
+                    app->extraction_error = std::string(failure.what()) + "; archive was not automatically discarded after publication failure";
+                    status(app->extraction_error);
+                }
             };
             android_session = random_token();
         }
@@ -206,21 +362,9 @@ Java_org_archivecatalog_app_NativeBridge_request(JNIEnv* environment, jclass, js
             }
             else if (route == "/api/state") {
                 result = android_app->snapshot(); result["platform"] = "android";
-                auto tree = android_tree();
-                if (!tree.empty()) result["settings"]["destination"] = tree;
             }
             else if (route == "/api/library") {
                 result = android_app->library();
-                if (!android_tree().empty()) {
-                    std::map<std::string, std::uint64_t> sizes;
-                    auto stored = android_storage({{"action", "list"}});
-                    for (const auto& file : stored.at("files"))
-                        if (file.at("size").get<std::int64_t>() >= 0) sizes[file.at("name")] = file.at("size");
-                    for (auto& file : result["files"]) {
-                        auto name = std::filesystem::u8path(file.at("name").get<std::string>()).filename().u8string();
-                        file["downloaded"] = sizes.count(name) && sizes.at(name) == file.at("size").get<std::uint64_t>();
-                    }
-                }
             }
             else if (route == "/api/diagnostics") result = {{"log", android_log->text()}};
             else if (route == "/api/diagnostics/clear") { android_log->clear(); result = Json::object(); }
@@ -230,44 +374,43 @@ Java_org_archivecatalog_app_NativeBridge_request(JNIEnv* environment, jclass, js
                 std::string chosen_tree;
                 if (action == "settings") {
                     chosen_tree = value.at("destination").get<std::string>();
-                    if (chosen_tree == android_downloads.u8string()) chosen_tree.clear();
-                    if (chosen_tree != android_tree() && !android_app->model.snapshot().queue.empty())
+                    if (value.contains("defaultLocation")) {
+                        if (chosen_tree != android_app->config.download_dir.u8string()) {
+                            // The Android picker changes the legacy destination field, not the saved location radio.
+                            value.erase("defaultLocation");
+                        } else {
+                            std::lock_guard<std::mutex> storage_guard(android_app->download_state_mutex);
+                            chosen_tree = find_location(android_app->download_state, value.at("defaultLocation").get<std::string>())
+                                .at("path").get<std::string>();
+                        }
+                    }
+                    if (chosen_tree != android_app->config.download_dir.u8string() && !android_app->model.snapshot().queue.empty())
                         throw std::runtime_error("Finish or remove queued downloads before changing the destination folder");
                     if (value.at("output") != (android_root / "exports").u8string() || (value.contains("ca") && value.at("ca") != android_ca.u8string()))
                         throw std::runtime_error("Android export and trust paths are managed by the app");
                     android_storage({{"action", "validate"}, {"tree", chosen_tree}});
-                    value["destination"] = android_downloads.u8string();
                 }
                 if (action == "import" && value.at("path") != (android_root / "import.xml").u8string())
                     throw std::runtime_error("Use the Android document picker to import a catalog");
                 if (action == "share") {
                     auto state = android_app->model.snapshot();
                     if (value.at("revision").get<std::uint64_t>() != state.catalog_revision) throw std::runtime_error("Library changed; refresh the selection");
-                    auto status = library_download_status(state.catalog.files, android_downloads);
-                    std::map<std::string, Json> destination;
-                    auto selected_tree = android_tree();
-                    if (!selected_tree.empty()) {
-                        auto stored = android_storage({{"action", "list"}});
-                        for (const auto& file : stored.at("files")) destination[file.at("name")] = file;
-                    }
+                    auto listing = android_app->library(true);
                     Json files = Json::array();
                     for (auto index : value.at("indices").get<std::vector<std::size_t>>()) {
-                        if (index >= status.size()) throw std::runtime_error("Invalid library selection");
-                        const auto& file = state.catalog.files.at(index);
-                        auto name = std::filesystem::u8path(file.name).filename().u8string();
-                        if (!selected_tree.empty()) {
-                            if (!destination.count(name) || destination.at(name).at("size") != file.size) throw std::runtime_error("Only completed downloads can be shared");
-                            files.push_back(destination.at(name).at("uri"));
-                        } else {
-                            if (!status[index]) throw std::runtime_error("Only completed downloads can be shared");
-                            files.push_back((android_downloads / std::filesystem::u8path(name)).u8string());
+                        if (index >= state.catalog.files.size()) throw std::runtime_error("Invalid library selection");
+                        bool found = false;
+                        for (const auto& entry : listing.at("files").at(index).at("downloadCopies")) if (entry.at("status") == "Downloaded" || entry.at("status") == "Unrecorded") {
+                            files.push_back(entry.at("path")); found = true; break;
                         }
+                        if (!found) throw std::runtime_error("Only unchanged completed downloads can be shared");
                     }
                     if (files.empty() || files.size() > 100) throw std::runtime_error("Select between 1 and 100 downloaded files");
                     result = {{"ok", true}, {"shareFiles", files}};
                 } else {
                     result = android_app->command(value);
-                    if (action == "settings") android_storage({{"action", "select"}, {"tree", chosen_tree}});
+                    if (action == "settings" || action == "defaultLocation" || action == "editLocation" || action == "removeLocation")
+                        android_storage({{"action", "select"}, {"tree", android_app->config.download_dir.u8string()}});
                     if (action == "export") result["shareFiles"] = {
                         (android_app->config.output_dir / "catalog.xml").u8string(),
                         (android_app->config.output_dir / "catalog.csv").u8string(),

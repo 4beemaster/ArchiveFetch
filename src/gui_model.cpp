@@ -53,6 +53,14 @@ std::string source_attribute(xmlNode* node, const char* name) {
     return result;
 }
 
+std::filesystem::path queue_partial_path(const File& file, const std::filesystem::path& destination,
+    const GuiModel::PartialPath& resolve) {
+    auto path = resolve ? resolve(file, destination) : destination / std::filesystem::u8path(file.name).filename();
+    if (path.empty()) throw std::runtime_error("Download staging path is unavailable");
+    if (!resolve) path += ".part";
+    return path;
+}
+
 }
 
 std::vector<std::string> normalize_tags(const std::vector<std::string>& tags) {
@@ -508,7 +516,9 @@ void GuiModel::export_files(std::filesystem::path directory) {
 }
 
 void GuiModel::enqueue(const std::vector<std::size_t>& indices, bool overwrite, std::filesystem::path destination) {
+#ifndef __ANDROID__
     if (!destination.empty()) destination = std::filesystem::weakly_canonical(std::filesystem::absolute(destination));
+#endif
     std::lock_guard<std::mutex> lock(mutex_);
     if (!state_.loaded) return;
     std::vector<Selection> selections;
@@ -609,7 +619,7 @@ void GuiModel::pause_entry(std::uint64_t id) {
     entry->rate = 0;
 }
 
-void GuiModel::start_downloads(Config config, Download download, std::uint64_t retry_id) {
+void GuiModel::start_downloads(Config config, Download download, std::uint64_t retry_id, PartialPath partial_path) {
     auto current = snapshot();
     if (!current.loaded) return;
     if (retry_id) {
@@ -635,7 +645,9 @@ void GuiModel::start_downloads(Config config, Download download, std::uint64_t r
     if (std::none_of(current.queue.begin(), current.queue.end(), [retry_id](const QueueEntry& entry) {
             return entry.status != QueueStatus::Verified && (!entry.pause_requested || retry_id == entry.id) && (!retry_id || entry.id == retry_id);
         })) return;
+#ifndef __ANDROID__
     config.download_dir = std::filesystem::weakly_canonical(std::filesystem::absolute(config.download_dir));
+#endif
     std::uint64_t first_new_id = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -645,11 +657,11 @@ void GuiModel::start_downloads(Config config, Download download, std::uint64_t r
             if (entry.status == QueueStatus::Verified || (retry_id && entry.id != retry_id)) continue;
             if (retry_id == entry.id) entry.pause_requested = false;
             if (entry.destination.empty()) entry.destination = config.download_dir;
-            entry.partial_path = entry.destination / std::filesystem::u8path(entry.file.name).filename();
-            entry.partial_path += ".part";
+            entry.partial_path = queue_partial_path(entry.file, entry.destination, partial_path);
         }
     }
-    launch(Lane::Downloads, "Starting download queue", [this, config = std::move(config), retry_id, first_new_id, download = std::move(download)] {
+    launch(Lane::Downloads, "Starting download queue", [this, config = std::move(config), retry_id, first_new_id,
+        download = std::move(download), partial_path = std::move(partial_path)] {
         bool failed = false;
         std::set<std::uint64_t> attempted;
         for (;;) {
@@ -665,8 +677,7 @@ void GuiModel::start_downloads(Config config, Download download, std::uint64_t r
                 if (next == state_.queue.end()) break;
                 attempted.insert(next->id);
                 if (next->destination.empty()) next->destination = config.download_dir;
-                next->partial_path = next->destination / std::filesystem::u8path(next->file.name).filename();
-                next->partial_path += ".part";
+                next->partial_path = queue_partial_path(next->file, next->destination, partial_path);
                 next->removal_requested = false;
                 next->status = QueueStatus::Active;
                 next->detail.clear();

@@ -1,0 +1,11 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <provider android:name="org.archivecatalog.app.StorageFixtureControlProvider"
+            android:authorities="${applicationId}.storage-fixture-control"
+            android:exported="true" android:grantUriPermissions="false" />
+        <provider android:name="org.archivecatalog.app.StorageFixtureProvider"
+            android:authorities="${applicationId}.storage-fixture"
+            android:permission="android.permission.MANAGE_DOCUMENTS"
+            android:exported="true" android:grantUriPermissions="true" />
+    </application>
+</manifest>

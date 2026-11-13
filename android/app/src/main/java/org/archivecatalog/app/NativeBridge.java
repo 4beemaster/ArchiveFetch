@@ -32,9 +32,14 @@ final class NativeBridge {
     static native void stop(String token);
     static native boolean copyCancelled();
     static native void copyProgress(long received, long total);
+    static native String extractPrivate(String archive, String folder, boolean cancel);
     static String storageRequest(String text) throws Exception {
         try { return downloadStorage.request(new JSONObject(text)).toString(); }
-        catch (Exception failure) { return new JSONObject().put("error", failure.getMessage() == null ? "Cannot access the selected folder" : failure.getMessage()).toString(); }
+        catch (Exception failure) {
+            StringBuilder error = new StringBuilder(failure.getMessage() == null ? "Cannot access the selected folder" : failure.getMessage());
+            for (Throwable cleanup : failure.getSuppressed()) error.append("; rollback failed: ").append(cleanup.getMessage());
+            return new JSONObject().put("error", error.toString()).toString();
+        }
     }
 
     private static SecretKey key(boolean create) throws Exception {

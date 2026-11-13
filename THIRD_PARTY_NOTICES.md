@@ -10,11 +10,11 @@ ArchiveFetch is licensed under the GNU General Public License v3.0 or later (see
 | [libxml2](https://gitlab.gnome.org/GNOME/libxml2) | 2.13.5 (PS5), 2.15.3 (Android), system (Windows) | PS5, Windows, Android | MIT |
 | [OpenSSL](https://www.openssl.org/) | 3.5.2 (PS5), system (Windows) | PS5, Windows | Apache-2.0 |
 | [BoringSSL](https://boringssl.googlesource.com/boringssl/) | 0.20261020.0 | Android | Apache-2.0 (some files ISC / OpenSSL license) |
-| [libarchive](https://www.libarchive.org/) | 3.7.4 | PS5 extractor | BSD-2-Clause |
-| [xz / liblzma](https://tukaani.org/xz/) | 5.4.6 | PS5 extractor | Public domain |
-| [Zstandard](https://facebook.github.io/zstd/) | 1.5.6 | PS5 | BSD-3-Clause |
-| [zlib](https://zlib.net/) | 1.3.2 | PS5 | zlib License |
-| [bzip2](https://sourceware.org/bzip2/) | from the PS5 SDK | PS5 extractor | bzip2 License (BSD-style) |
+| [libarchive](https://www.libarchive.org/) | 3.7.4 (PS5), 3.8.2 (native) | PS5, Windows, Android extractors | BSD-2-Clause |
+| [xz / liblzma](https://tukaani.org/xz/) | 5.4.6 (PS5), 5.8.1 (native) | PS5, Windows, Android extractors | Public domain (PS5); 0BSD and component licenses in COPYING (native) |
+| [Zstandard](https://facebook.github.io/zstd/) | 1.5.6 (PS5), 1.5.7 (native) | PS5, Windows, Android | BSD-3-Clause |
+| [zlib](https://zlib.net/) | 1.3.2 (PS5), 1.3.1 (native) | PS5, Windows, Android | zlib License |
+| [bzip2](https://sourceware.org/bzip2/) | from the PS5 SDK; 1.0.8 (native) | PS5, Windows, Android extractors | bzip2 License (BSD-style) |
 | [libpsl](https://github.com/rockdaboot/libpsl) | 0.21.5 | PS5 | MIT |
 | [GNU libiconv](https://www.gnu.org/software/libiconv/) | from the PS5 SDK | PS5 | LGPL-2.1-or-later |
 | [Mozilla CA certificate list](https://curl.se/docs/caextract.html) | 2026-10-20 | PS5 | MPL-2.0 |
@@ -29,6 +29,8 @@ ArchiveFetch is licensed under the GNU General Public License v3.0 or later (see
 | [QR Code Generator (kazuhikoarase)](https://github.com/kazuhikoarase/qrcode-generator) | 1.4.4 | all | MIT |
 
 The Karla, Font Awesome, QR Code Generator and (Windows) WebView2 SDK license texts are bundled with every build next to the files they cover. The full license texts of the other components are at the links above and in each component's source package.
+
+Native extraction statically links SHA-256-verified libarchive, zlib, bzip2, liblzma and Zstandard sources fetched only during the build. It never downloads extraction tools or dependencies at runtime. Their notices are generated in `extraction-licenses` for packaging and copied into the Windows web assets; Android packaging uses the same generated license directory.
 
 The PS5 build statically links the GPL-3.0-or-later ps5-payload-sdk, so `ArchiveFetch.elf` (also carried inside the Android APK for Install/Update) is distributed under the GPL-3.0-or-later; its complete source is this repository. The LGPL-2.1-or-later GNU libiconv is linked statically into the same ELF; its source is available from the link above, and this repository's source and build files let you relink the ELF against a modified version.
 

@@ -44,6 +44,12 @@ public final class NativeIntegrationTest {
         assertTrue(parent != null && (parent.isDirectory() || parent.mkdirs()));
         try (FileOutputStream stream = new FileOutputStream(file)) { stream.write(text.getBytes(StandardCharsets.UTF_8)); }
     }
+    static File stagingDirectory(File downloads, String destination) throws Exception {
+        StringBuilder hash = new StringBuilder();
+        for (byte value : java.security.MessageDigest.getInstance("SHA-256").digest(destination.getBytes(StandardCharsets.UTF_8)))
+            hash.append(String.format(java.util.Locale.ROOT, "%02x", value & 255));
+        return new File(new File(downloads, ".staging"), hash.toString());
+    }
     private JSONObject request(String path) throws Exception { return new JSONObject(NativeBridge.request(path, "{}", token)); }
     private JSONObject command(JSONObject value) throws Exception { return new JSONObject(NativeBridge.request("/api/command", value.toString(), token)); }
     private JSONObject stateWhenIdle() throws Exception {
@@ -56,6 +62,14 @@ public final class NativeIntegrationTest {
             Thread.sleep(25);
         } while (SystemClock.elapsedRealtime() < deadline);
         throw new AssertionError("Native operation did not become idle: " + state);
+    }
+    private static void clickPickerButton(UiDevice device, androidx.test.uiautomator.BySelector selector, String message) {
+        for (int attempt = 0; ; ++attempt) {
+            UiObject2 button = device.wait(Until.findObject(selector), 10000);
+            assertNotNull(message, button);
+            try { button.click(); return; }
+            catch (androidx.test.uiautomator.StaleObjectException stale) { if (attempt == 4) throw stale; }
+        }
     }
     private void start(File root, File downloads, File ca) throws Exception {
         JSONObject result = new JSONObject(NativeBridge.start(root.getAbsolutePath(), downloads.getAbsolutePath(), ca.getAbsolutePath()));
@@ -271,7 +285,7 @@ public final class NativeIntegrationTest {
             assertTrue(command(new JSONObject().put("action", "import").put("path", new File(root, "import.xml").getAbsolutePath())).getBoolean("ok"));
             long revision = stateWhenIdle().getLong("catalogRevision");
             for (int attempt = 0; attempt < 2; ++attempt) {
-                write(new File(downloads, name + ".part"), "abc");
+                write(new File(stagingDirectory(downloads, expected), name + ".part"), "abc");
                 assertTrue(command(new JSONObject().put("action", "enqueue").put("indices", new JSONArray().put(0))
                     .put("revision", revision).put("overwrite", attempt > 0)).getBoolean("ok"));
                 assertTrue(command(new JSONObject().put("action", "start")).getBoolean("ok"));
@@ -340,7 +354,7 @@ public final class NativeIntegrationTest {
             assertTrue(command(new JSONObject().put("action", "favorite").put("index", 0).put("revision", revision)).getBoolean("ok"));
             assertTrue(command(new JSONObject().put("action", "enqueue").put("indices", new JSONArray().put(1)).put("revision", revision)).getBoolean("ok"));
             assertEquals(1, request("/api/state").getJSONArray("queue").length());
-            write(new File(downloads, betaName), "abc");
+            write(new File(stagingDirectory(downloads, request("/api/state").getJSONObject("settings").getString("destination")), betaName), "abc");
             assertTrue(command(new JSONObject().put("action", "start")).getBoolean("ok"));
             state = stateWhenIdle();
             assertEquals(state.toString(), 0, state.getJSONArray("queue").length());
@@ -360,10 +374,16 @@ public final class NativeIntegrationTest {
             assertFalse(isolated.getSharedPreferences("credentials", Context.MODE_PRIVATE).contains("sealed"));
         } finally {
             NativeBridge.stop(token);
-            JSONArray stored = new DownloadStorage(isolated).request(new JSONObject().put("action", "list")).getJSONArray("files");
+            DownloadStorage cleanup = new DownloadStorage(isolated);
+            cleanup.request(new JSONObject().put("action", "configure").put("private", downloads.getAbsolutePath()));
+            JSONArray stored = cleanup.request(new JSONObject().put("action", "list")).getJSONArray("files");
             for (int index = 0; index < stored.length(); ++index) {
                 JSONObject file = stored.getJSONObject(index);
-                if (betaName.equals(file.getString("name"))) target.getContentResolver().delete(android.net.Uri.parse(file.getString("uri")), null, null);
+                if (betaName.equals(file.getString("name"))) {
+                    android.net.Uri uri = android.net.Uri.parse(file.getString("uri"));
+                    if ("file".equals(uri.getScheme())) java.nio.file.Files.delete(new File(uri.getPath()).toPath());
+                    else target.getContentResolver().delete(uri, null, null);
+                }
             }
             isolated.getSharedPreferences("credentials", Context.MODE_PRIVATE).edit().clear().commit();
         }
@@ -443,17 +463,15 @@ public final class NativeIntegrationTest {
                     assertNotNull("Download folder disappeared from Android's picker", folder);
                 }
             }
-            UiObject2 select = device.wait(Until.findObject(By.text(java.util.regex.Pattern.compile("(?i)use this folder"))), 10000);
-            assertNotNull("Folder picker has no selection button", select); select.click();
-            UiObject2 allow = device.wait(Until.findObject(By.res("android", "button1")), 10000);
-            assertNotNull("Folder grant was not requested", allow); allow.click();
+            clickPickerButton(device, By.text(java.util.regex.Pattern.compile("(?i)use this folder")), "Folder picker has no selection button");
+            clickPickerButton(device, By.res("android", "button1"), "Folder grant was not requested");
             waitScript(instrumentation, web.get(), "!state.pending && document.querySelector('#destination-input').value.startsWith('content://')", 15000);
             script(instrumentation, web.get(), "document.querySelector('#automatic').checked=false; document.querySelector('#settings-form').requestSubmit(); true");
             waitScript(instrumentation, web.get(), "!state.pending && state.snapshot.settings.destination.startsWith('content://')", 15000);
             String selected = new DownloadStorage(target).tree();
             assertTrue(selected.startsWith("content://"));
             String filename = "Alpha \uD83C\uDFAE.chd";
-            write(new File(target.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), filename + ".part"), "abc");
+            write(new File(stagingDirectory(target.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), selected), filename + ".part"), "abc");
             script(instrumentation, web.get(), "run('enqueue', {indices:[0], revision:state.snapshot.catalogRevision}); true");
             waitScript(instrumentation, web.get(), "!state.pending && state.snapshot.queue.length===1", 10000);
             script(instrumentation, web.get(), "run('start'); true");
@@ -473,7 +491,7 @@ public final class NativeIntegrationTest {
                 .put("revision", new JSONObject(NativeBridge.request("/api/state", "{}", stateToken(instrumentation, web.get()))).getLong("catalogRevision")).toString(), stateToken(instrumentation, web.get())));
             assertTrue(overwrite.toString(), overwrite.has("confirmOverwrite"));
             assertEquals(selected, new DownloadStorage(target).tree());
-            write(new File(target.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), filename + ".part"), "bad");
+            write(new File(stagingDirectory(target.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), selected), filename + ".part"), "bad");
             script(instrumentation, web.get(), "run('enqueue', {indices:[0], revision:state.snapshot.catalogRevision, overwrite:true}); true");
             waitScript(instrumentation, web.get(), "!state.pending && state.snapshot.queue.length===1", 10000);
             script(instrumentation, web.get(), "run('start'); true");
@@ -481,7 +499,7 @@ public final class NativeIntegrationTest {
             try (java.io.InputStream input = target.getContentResolver().openInputStream(android.net.Uri.parse(copied.getString("uri")))) {
                 assertNotNull(input); assertEquals('a', input.read()); assertEquals('b', input.read()); assertEquals('c', input.read()); assertEquals(-1, input.read());
             }
-            write(new File(target.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), filename + ".part"), "abc");
+            write(new File(stagingDirectory(target.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), selected), filename + ".part"), "abc");
             script(instrumentation, web.get(), "run('start'); true");
             waitScript(instrumentation, web.get(), "!busy() && state.snapshot.queue.length===0", 10000);
             JSONArray replaced = new DownloadStorage(target).request(new JSONObject().put("action", "list")).getJSONArray("files");
@@ -504,7 +522,10 @@ public final class NativeIntegrationTest {
             assertTrue(android.provider.DocumentsContract.deleteDocument(target.getContentResolver(), android.net.Uri.parse(copied.getString("uri"))));
             target.getContentResolver().releasePersistableUriPermission(android.net.Uri.parse(selected), Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
             JSONObject revoked = new JSONObject(NativeBridge.request("/api/library", "{}", stateToken(instrumentation, web.get())));
-            assertTrue(revoked.toString(), revoked.optString("error").contains("revoked"));
+            assertFalse(revoked.toString(), revoked.has("error"));
+            JSONObject unavailable = revoked.getJSONArray("files").getJSONObject(0).getJSONArray("downloadCopies").getJSONObject(0);
+            assertEquals("Location unavailable", unavailable.getString("status"));
+            assertTrue(revoked.toString(), unavailable.optString("error").contains("revoked"));
             assertTrue(new JSONObject(NativeBridge.storageRequest("{\"action\":\"select\",\"tree\":\"\"}")).getBoolean("ok"));
         } finally { instrumentation.runOnMainSync(activity::finish); }
     }

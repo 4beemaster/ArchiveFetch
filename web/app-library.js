@@ -16,7 +16,7 @@ async function loadLibrary(force = false) {
 function queueStatus(file) {
   const queued = state.queueMap.get(JSON.stringify([file.item, file.name]));
   if (queued) return { text: queued.status.startsWith('Transferring') ? 'Downloading' : queued.status, kind: queued.status === 'Failed' ? 'failed' : 'warn', queued: true };
-  return { text: (!android && file.downloadState) || (file.downloaded ? 'Downloaded' : 'Not downloaded'), kind: file.downloaded ? 'good' : !android && file.downloadPath ? 'warn' : '', queued: false };
+  return { text: file.downloadState || (file.downloaded ? 'Downloaded' : 'Not downloaded'), kind: file.downloaded ? 'good' : file.downloadPath ? 'warn' : '', queued: false };
 }
 function middlePath(path, limit = 52) {
   if (path.length <= limit) return path;
@@ -117,12 +117,12 @@ function renderLibrary() {
     row.append(sourceCell, tagsCell(file.sourceTags), tagsCell(file.tags, null, file), node('td', bytes(file.size), 'size-cell'));
     const status = queueStatus(file); const statusCell = node('td', undefined, 'status-cell');
     statusCell.append(node('span', status.text, `badge ${status.kind}`));
-    if (!android && file.downloadPath) {
+    if (file.downloadPath) {
       const path = pathLabel(file.downloadPath, 30);
       if (file.downloadCopies?.length) path.title = file.downloadCopies.map(copy => `${copy.status}: ${copy.path}${copy.extracted ? `\nExtracted to: ${copy.extracted}` : ''}`).join('\n');
       statusCell.append(path);
     }
-    if (!android && file.downloadPath && !status.queued && (file.downloaded || staleCopy(file)))
+    if (state.snapshot.settings.locationsSupported && file.downloadPath && !status.queued && (file.downloaded || staleCopy(file)))
       statusCell.append(iconButton('trash', `${file.downloaded ? 'Delete downloaded file' : 'Remove download record'}: ${displayName}`, () => deleteDownload(file), busy()));
     row.append(statusCell); fragment.append(row);
   }

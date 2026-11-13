@@ -1,0 +1,20 @@
+# libarchive resets CMAKE_MODULE_PATH and otherwise finds host import libraries.
+# Disable only its system discovery; seed its config and link our built targets.
+foreach(feature ZLIB BZip2 LZMA ZSTD)
+    set(ENABLE_${feature} OFF CACHE BOOL "" FORCE)
+endforeach()
+foreach(header ZLIB BZLIB LZMA ZSTD)
+    set(HAVE_${header}_H 1)
+endforeach()
+set(HAVE_LIBZ 1)
+set(HAVE_LIBBZ2 1)
+set(HAVE_LIBLZMA 1)
+set(HAVE_LIBZSTD 1)
+set(HAVE_ZSTD_compressStream 1)
+set(HAVE_ZSTD_minCLevel 1)
+set(HAVE_LZMA_STREAM_ENCODER_MT 0)
+
+function(archivefetch_link_compression target)
+    target_link_libraries(${target} zlibstatic archivefetch_bzip2 liblzma libzstd_static)
+    target_compile_definitions(${target} PRIVATE LZMA_API_STATIC USE_BZIP2_STATIC)
+endfunction()

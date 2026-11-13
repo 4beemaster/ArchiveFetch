@@ -82,7 +82,8 @@ public:
     void pause_entry(std::uint64_t id);
     void clear_finished();
     using Download = std::function<void(const File&, const std::filesystem::path&, bool, const TransferHooks&)>;
-    void start_downloads(Config config, Download download = {}, std::uint64_t retry_id = 0);
+    using PartialPath = std::function<std::filesystem::path(const File&, const std::filesystem::path&)>;
+    void start_downloads(Config config, Download download = {}, std::uint64_t retry_id = 0, PartialPath partial_path = {});
     void cancel();
     void cancel_scan();
     void cancel_downloads();

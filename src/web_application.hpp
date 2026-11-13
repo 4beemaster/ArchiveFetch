@@ -48,11 +48,7 @@ constexpr const char* update_platform =
     "other";
 #endif
 
-#ifdef __ANDROID__
-constexpr bool named_locations_supported = false;
-#else
 constexpr bool named_locations_supported = true;
-#endif
 
 class DiagnosticLog final : public std::streambuf {
 public:
@@ -135,6 +131,9 @@ void write_download_state(const std::filesystem::path& path, const Json& value) 
 std::string location_path(const std::string& value) {
     if (value.empty() || value.size() > 32768 || std::any_of(value.begin(), value.end(), [](unsigned char character) { return character < 32; }))
         throw std::runtime_error("Choose a valid download folder");
+#ifdef __ANDROID__
+    if (value.rfind("content://", 0) == 0) return value;
+#endif
     auto path = std::filesystem::u8path(value);
     if (!path.is_absolute()) throw std::runtime_error("Download locations need an absolute path");
     return path.lexically_normal().u8string();
@@ -175,6 +174,10 @@ public:
     std::mutex extraction_mutex;
     std::string extraction_error;
     std::function<bool(const File&)> destination_exists;
+    std::function<Json(const Json&)> platform_storage;
+    GuiModel::PartialPath platform_partial_path;
+    std::function<void(const File&, const std::filesystem::path&, const TransferHooks&)> platform_record_download;
+    std::function<void(const File&, const std::filesystem::path&, const TransferHooks&)> platform_extract_after_download;
     std::function<void()> open_s3_keys;
     std::function<void(const std::string&)> open_update;
     UpdateCheck updates;
@@ -268,7 +271,13 @@ public:
             }
         } catch (const std::exception& failure) { error = failure.what(); collections_writable = false; }
         download_state = {{"version", 1}, {"preference", "auto"}, {"default", "default"}, {"last", ""}, {"locations", Json::array({
-            {{"id", "default"}, {"name", "Default"}, {"tags", Json::array()}, {"path", std::filesystem::absolute(config.download_dir).lexically_normal().u8string()}}
+            {{"id", "default"}, {"name", "Default"}, {"tags", Json::array()}, {"path",
+#ifdef __ANDROID__
+                config.download_dir.u8string()
+#else
+                std::filesystem::absolute(config.download_dir).lexically_normal().u8string()
+#endif
+            }}
         })}, {"records", Json::array()}};
         try {
             if (std::filesystem::exists(root / "download-locations.json")) {
@@ -379,7 +388,7 @@ public:
 
     Json library(bool include_hidden = false) {
         auto state = model.snapshot();
-        auto status = library_download_status(state.catalog.files, config.download_dir);
+        auto status = platform_storage ? std::vector<bool>(state.catalog.files.size(), false) : library_download_status(state.catalog.files, config.download_dir);
         std::lock_guard<std::mutex> guard(download_state_mutex);
         auto updated = download_state;
         bool adopted = false;
@@ -389,7 +398,7 @@ public:
             history[{record.at("item").get<std::string>(), record.at("name").get<std::string>()}].push_back(record);
             recorded_paths.insert(record.at("path").get<std::string>());
         }
-        const auto target_directory = std::filesystem::absolute(config.download_dir).lexically_normal();
+        const auto target_directory = platform_storage ? config.download_dir : std::filesystem::absolute(config.download_dir).lexically_normal();
         // Each location folder is listed once, so a download without a record (made outside the app, or whose record
         // went with its library entry) is recognized in any location, not only the default one.
         struct FolderListing { std::filesystem::path folder; std::map<std::string, std::uintmax_t> files; std::set<std::string> folders; };
@@ -397,10 +406,12 @@ public:
         {
             std::vector<std::filesystem::path> folders{target_directory};
             for (const auto& location : updated.at("locations")) {
+                if (platform_storage) continue;
                 const auto folder = std::filesystem::absolute(std::filesystem::u8path(location.at("path").get<std::string>())).lexically_normal();
                 if (std::find(folders.begin(), folders.end(), folder) == folders.end()) folders.push_back(folder);
             }
             for (const auto& folder : folders) {
+                if (platform_storage) continue;
                 FolderListing listing{folder, {}, {}};
                 std::error_code failure;
                 for (std::filesystem::directory_iterator entry(folder, failure), end; !failure && entry != end; entry.increment(failure)) {
@@ -444,6 +455,14 @@ public:
             bool present = false;
             Json copies = Json::array();
             for (const auto& record : history[key]) {
+                if (platform_storage && record.contains("storage")) {
+                    auto copy = platform_storage({{"action", "status"}, {"record", record}, {"metadataOnly", true}});
+                    copies.push_back(copy);
+                    const auto copy_status = copy.at("status").get<std::string>();
+                    if (!present) { downloaded_path = record.at("path"); download_status = copy_status; }
+                    if (copy_status == "Downloaded" || copy_status == "Extracted") present = true;
+                    continue;
+                }
                 const auto path = std::filesystem::u8path(record.at("path").get<std::string>());
                 const auto recorded_folder = record.value("extracted", "");
                 const auto folder = !recorded_folder.empty() ? std::filesystem::u8path(recorded_folder) : extract ? extracted_folder(path, file.name) : std::filesystem::path{};
@@ -467,6 +486,31 @@ public:
                 copies.push_back(std::move(copy));
                 if (!present) { downloaded_path = path.u8string(); download_status = copy_status; }
                 if (copy_status == "Downloaded" || copy_status == "Extracted") present = true;
+            }
+            if (platform_storage && copies.empty() && basenames[target.filename().u8string()] == 1) {
+                std::set<std::string> locations;
+                for (const auto& location : updated.at("locations")) locations.insert(location.at("path").get<std::string>());
+                for (const auto& location : locations) {
+                    Json found;
+                    try {
+                        found = platform_storage({{"action", "discover"}, {"tree", location},
+                            {"name", std::filesystem::u8path(file.name).filename().u8string()}, {"size", file.size}, {"sha1", file.sha1}, {"md5", file.md5}, {"metadataOnly", true}});
+                    } catch (const std::exception& failure) {
+                        std::cerr << "[storage] Cannot inspect download location: " << failure.what() << '\n';
+                        continue;
+                    }
+                    if (!found.at("found").get<bool>()) continue;
+                    const auto path = found.at("path").get<std::string>();
+                    if (recorded_paths.count(path)) continue;
+                    if (found.contains("record") && download_state_writable) {
+                        auto record = found.at("record");
+                        record["item"] = file.item; record["name"] = file.name; record["size"] = file.size;
+                        updated["records"].push_back(record); recorded_paths.insert(path); adopted = true;
+                    }
+                    copies.push_back({{"path", path}, {"status", found.at("status")}});
+                    if (!present) { downloaded_path = path; download_status = found.at("status"); }
+                    present = true;
+                }
             }
             if (copies.empty() && basenames[target.filename().u8string()] == 1) {
                 const auto filename = target.filename().u8string();
@@ -514,6 +558,7 @@ public:
             const auto labels = normalize_tags({value.at("name").get<std::string>()});
             if (labels.size() != 1) throw std::runtime_error("Give the download location a nickname");
             const auto path = location_path(value.at("path").get<std::string>());
+            if (platform_storage) platform_storage({{"action", "validate"}, {"tree", path}});
             if (action == "addLocation") {
                 if (next.at("locations").size() >= 128) throw std::runtime_error("Use at most 128 download locations");
                 id = random_token().substr(0, 16);
@@ -562,6 +607,7 @@ public:
 
     // Runs on the download worker after the file is recorded; a failed or stopped extraction keeps the download.
     void extract_after_download(const File& file, const std::filesystem::path& directory, const TransferHooks& hooks) {
+        if (platform_extract_after_download) { platform_extract_after_download(file, directory, hooks); return; }
         const auto folder_name = archive_folder_name(file.name);
         if (!extract || folder_name.empty()) return;
         const auto base = std::filesystem::weakly_canonical(std::filesystem::absolute(directory));
@@ -611,6 +657,21 @@ public:
     std::uint64_t delete_download(const File& file, const std::string& requested) {
         if (!named_locations_supported) throw std::runtime_error("Deleting downloads is not supported on this platform");
         std::lock_guard<std::mutex> guard(download_state_mutex);
+        if (platform_storage) {
+            auto next = download_state;
+            auto& records = next["records"];
+            auto found = std::find_if(records.begin(), records.end(), [&](const Json& record) {
+                return record.at("item") == file.item && record.at("name") == file.name && record.at("path") == requested && record.contains("storage");
+            });
+            if (found == records.end()) throw std::runtime_error("That copy is not owned by ArchiveFetch");
+            if (!download_state_writable) throw std::runtime_error("Repair saved download records before deleting");
+            const auto status = platform_storage({{"action", "status"}, {"record", *found}}).at("status").get<std::string>();
+            const auto freed = status == "Missing" || status == "Location unavailable" ? std::uint64_t{0}
+                : platform_storage({{"action", "deleteCopy"}, {"record", *found}}).at("bytes").get<std::uint64_t>();
+            records.erase(found);
+            commit_download_state(std::move(next));
+            return freed;
+        }
         bool recorded = false;
         std::string recorded_folder;
         for (const auto& record : download_state.at("records"))
@@ -659,7 +720,11 @@ public:
         auto next = download_state;
         auto& records = next["records"];
         const auto before = records.size();
-        records.erase(std::remove_if(records.begin(), records.end(), [include_unavailable](const Json& record) {
+        records.erase(std::remove_if(records.begin(), records.end(), [this, include_unavailable](const Json& record) {
+            if (platform_storage && record.contains("storage")) {
+                const auto status = platform_storage({{"action", "status"}, {"record", record}}).at("status").get<std::string>();
+                return status == "Missing" || (include_unavailable && status == "Location unavailable");
+            }
             const auto path = std::filesystem::u8path(record.at("path").get<std::string>());
             std::error_code failure;
             const auto disk = std::filesystem::symlink_status(path, failure);
@@ -721,10 +786,10 @@ public:
                 if (status == "Downloaded" || status == "Extracted") {
                     removable.emplace_back(index, copy.at("path").get<std::string>());
                     if (status == "Downloaded") deleting.push_back(copy.at("path"));
-                    if (copy.contains("extracted") && real_directory(std::filesystem::u8path(copy.at("extracted").get<std::string>()))) {
+                    if (copy.contains("extracted") && (platform_storage || real_directory(std::filesystem::u8path(copy.at("extracted").get<std::string>())))) {
                         ++extracted_folders; deleting.push_back(copy.at("extracted"));
                         // Only counted for the preview's size; walking every folder for the other choices is not needed.
-                        if (value.value("preview", false)) present_bytes += tree_size(std::filesystem::u8path(copy.at("extracted").get<std::string>()));
+                        if (value.value("preview", false)) present_bytes += platform_storage ? copy.value("extractedBytes", std::uint64_t{0}) : tree_size(std::filesystem::u8path(copy.at("extracted").get<std::string>()));
                     }
                 }
                 else kept.push_back(copy.at("path"));
@@ -738,6 +803,7 @@ public:
             if (!sources.count(file.item)) orphans.insert(key);
             bool partial = false;
             for (const auto& folder : folders) {
+                if (platform_storage) continue;
                 auto part = folder / std::filesystem::u8path(file.name).filename();
                 part += ".part";
                 std::error_code failure;
@@ -795,18 +861,15 @@ public:
     }
 
     void start_downloads(std::uint64_t retry_id = 0) {
-#ifdef __ANDROID__
-        model.start_downloads(config, download, retry_id);
-#else
         if (!download_state_writable) throw std::runtime_error("Repair saved download locations before downloading");
         const auto transfer = download;
         model.start_downloads(config, [this, transfer, ca = config.ca_bundle, keys = config.s3, connections = config.download_connections](const File& file, const std::filesystem::path& directory, bool overwrite, const TransferHooks& hooks) {
             if (transfer) transfer(file, directory, overwrite, hooks);
             else { Http http(ca, hooks, keys, connections); http.download(file, directory, overwrite); }
-            record_download(file, directory);
+            if (platform_record_download) platform_record_download(file, directory, hooks);
+            else record_download(file, directory);
             extract_after_download(file, directory, hooks);
-        }, retry_id);
-#endif
+        }, retry_id, platform_partial_path);
     }
 
         void save_file_tags(const File& file, const std::vector<std::string>& tags) {
@@ -1192,7 +1255,8 @@ public:
                 next_locations["default"] = id;
             } else {
                 if (next.download_dir.empty()) throw std::runtime_error("Choose a download directory");
-                next.download_dir = std::filesystem::absolute(next.download_dir).lexically_normal();
+                next.download_dir = platform_storage ? std::filesystem::u8path(location_path(next.download_dir.u8string())) : std::filesystem::absolute(next.download_dir).lexically_normal();
+                if (platform_storage) platform_storage({{"action", "validate"}, {"tree", next.download_dir.u8string()}});
                 next_locations["default"] = "default";
                 for (auto& location : next_locations["locations"]) if (location.at("id") == "default") location["path"] = next.download_dir.u8string();
             }
@@ -1469,7 +1533,9 @@ public:
                                 conflicts.push_back({{"index", indices[offset]}, {"name", file.name}, {"locations", options}});
                             }
                         }
-                        destinations[offset] = std::filesystem::weakly_canonical(std::filesystem::u8path(find_location(download_state, id).at("path").get<std::string>()));
+                        const auto path = find_location(download_state, id).at("path").get<std::string>();
+                        if (platform_storage) platform_storage({{"action", "validate"}, {"tree", path}});
+                        destinations[offset] = platform_storage ? std::filesystem::u8path(path) : std::filesystem::weakly_canonical(std::filesystem::u8path(path));
                     }
                 }
                 if (!conflicts.empty()) return {{"locationConflicts", conflicts}};
@@ -1479,9 +1545,9 @@ public:
                     const auto target = destinations[offset] / std::filesystem::u8path(file.name).filename();
                     const auto folder = extract ? extracted_folder(target, file.name) : std::filesystem::path{};
                     if (overwrite) continue;
-                    if (destination_exists ? destination_exists(file) : std::filesystem::exists(target)) existing.push_back(named_locations_supported ? target.u8string() : file.name);
+                    if (platform_storage ? platform_storage({{"action", "exists"}, {"tree", destinations[offset].u8string()}, {"name", std::filesystem::u8path(file.name).filename().u8string()}, {"folder", archive_folder_name(file.name)}}).at("exists").get<bool>() : destination_exists ? destination_exists(file) : std::filesystem::exists(target)) existing.push_back(target.u8string());
                     // Extraction refuses an existing folder, so an extracted copy counts as downloaded too.
-                    else if (real_directory(folder)) existing.push_back(folder.u8string());
+                    else if (!platform_storage && real_directory(folder)) existing.push_back(folder.u8string());
                 }
                 if (!existing.empty()) return {{"confirmOverwrite", existing}};
                 if (!selection.empty()) location_command("useLocation", {{"id", selection}});

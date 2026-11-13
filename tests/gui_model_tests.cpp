@@ -1,6 +1,7 @@
 #include "gui_model.hpp"
 #include "transfer.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
@@ -586,6 +587,56 @@ int main() {
             invalid << "<!DOCTYPE sources [<!ENTITY x 'test'>]><sources/>";
             }
             rejects([&] { read_source_list(saved_sources); });
+        }
+        {
+            GuiModel staged;
+            const File first{"staging-fixture", "First.bin", 3, {}, "a9993e364706816aba3e25717850c26c9cd0d89d"};
+            const File second{"staging-fixture", "Second.bin", 3, {}, "a9993e364706816aba3e25717850c26c9cd0d89d"};
+            staged.add_files({first, second});
+            const auto destination = directory / "external-destination";
+            const auto staging = directory / "private-staging";
+            std::filesystem::create_directories(destination);
+            std::filesystem::create_directories(staging);
+            const auto resolve = [&](const File& file, const std::filesystem::path& target) {
+                require(target == std::filesystem::weakly_canonical(destination), "Resolver receives selected destination");
+                auto result = staging / std::filesystem::u8path(file.name).filename();
+                result += ".part";
+                return result;
+            };
+            { std::ofstream output(resolve(first, destination)); output << "abc"; }
+            { std::ofstream output(resolve(second, destination)); output << "abc"; }
+            const auto untouched = destination / (second.name + ".part");
+            { std::ofstream output(untouched); output << "keep"; }
+            staged.enqueue({0, 1}, false, destination);
+            const auto held = staged.snapshot().queue[1].id;
+            staged.pause_entry(held);
+            Config staging_config;
+            staging_config.download_dir = destination;
+            staged.start_downloads(staging_config, [](const File&, const std::filesystem::path&, bool, const TransferHooks&) {
+                throw OperationCancelled();
+            }, 0, resolve);
+            staged.wait();
+            auto paused = staged.snapshot();
+            require(paused.queue[0].partial_path == resolve(first, destination) &&
+                paused.queue[1].partial_path == resolve(second, destination), "Private partial paths assigned before the queue starts");
+            staged.remove_entry(held);
+            require(!std::filesystem::exists(resolve(second, destination)) && std::filesystem::exists(untouched),
+                "Removing a held entry cleans private staging, not its external destination");
+            unsigned completed = 0;
+            staged.start_downloads(staging_config, [&](const File& file, const std::filesystem::path& target, bool, const TransferHooks&) {
+                const auto running = staged.snapshot();
+                const auto entry = std::find_if(running.queue.begin(), running.queue.end(),
+                    [&](const QueueEntry& queued) { return queued.file.name == file.name; });
+                require(entry != running.queue.end() && entry->partial_path == resolve(file, target),
+                    "Running and newly appended entries use the same private staging resolver");
+                if (!completed++) staged.enqueue({1}, false, destination);
+            }, 0, resolve);
+            staged.wait();
+            require(completed == 2 && staged.snapshot().queue.empty(), "Private staging resolver supports queue additions");
+            staged.enqueue({0}, false, destination);
+            rejects([&] {
+                staged.start_downloads(staging_config, {}, 0, [](const File&, const std::filesystem::path&) { return std::filesystem::path{}; });
+            });
         }
         std::filesystem::remove_all(directory);
         std::cout << "All GUI model tests passed\n";

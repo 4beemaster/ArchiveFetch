@@ -1,5 +1,8 @@
 #include "web_application.hpp"
 #include "console_link.hpp"
+#if !defined(__ANDROID__) && !defined(ARCHIVEFETCH_PS5_HOST)
+#include "native_extraction.hpp"
+#endif
 #ifdef _WIN32
 #include "windows_update.hpp"
 #endif
@@ -79,6 +82,7 @@ int main(int argc, char** argv) {
         if (smoke && std::filesystem::exists(isolated) && !std::filesystem::is_empty(isolated)) throw std::runtime_error("Smoke tests require an empty data directory");
         DiagnosticLog diagnostic_log;
         WebApplication application(isolated);
+        application.extract = native_extract;
         if (smoke) {
             require(application.model.snapshot().sources.empty(), "Fresh installation has no bundled sources");
             Config fixture = application.config; fixture.sources = {"https://archive.org/details/archive-web-test"}; fixture.follow_parts = false;

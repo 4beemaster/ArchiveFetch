@@ -220,13 +220,13 @@ document.querySelectorAll('.close-dialog').forEach(button => button.addEventList
 $('settings-dialog').addEventListener('close', () => { $('access-key').value = ''; $('secret-key').value = ''; loadLibrary(true).catch(error => fail(error.message)); });
 document.querySelectorAll('.browse').forEach(button => button.addEventListener('click', async () => {
   if (folderBrowser) { await openFolderBrowser(button.dataset.input); return; }
-  const result = await run('chooseDirectory'); if (result?.path) $(button.dataset.input).value = result.path;
+  const result = await run('chooseDirectory', { purpose: button.dataset.input }); if (result?.path) $(button.dataset.input).value = result.path;
 }));
 $('settings-form').addEventListener('submit', async event => {
   event.preventDefault();
   try {
     const result = await command('settings', { destination: $('destination-input').value, output: $('output-input').value,
-      ...(!android && state.snapshot.settings.locationsSupported ? { defaultLocation: state.snapshot.settings.defaultLocation, locationPreference: $('location-preference').value } : {}),
+      ...(state.snapshot.settings.locationsSupported ? { defaultLocation: state.snapshot.settings.defaultLocation, locationPreference: $('location-preference').value } : {}),
       automatic: $('automatic').checked, remember: $('remember').checked, connections: Number($('connections').value),
       ...(state.snapshot.settings.extractSupported ? { extractArchives: $('extract-archives').checked, deleteExtracted: $('delete-extracted').checked } : {}),
       excludedExtensions: $('excluded-extensions').value,
@@ -558,7 +558,7 @@ async function start() {
   setTimeout(async function poll() { await refresh(); setTimeout(poll, 800); }, 800);
 }
 if (android) {
-  ['destination-input', 'output-input'].forEach(id => { $(id).readOnly = true; });
-  document.querySelectorAll('.browse').forEach(button => { button.hidden = button.dataset.input !== 'destination-input'; });
+  ['destination-input', 'output-input', 'location-path'].forEach(id => { $(id).readOnly = true; });
+  document.querySelectorAll('.browse').forEach(button => { button.hidden = !['destination-input', 'location-path'].includes(button.dataset.input); });
 }
 view(state.view); updateControls(); start();

@@ -175,7 +175,7 @@ function renderQueue() {
     row = node('div', undefined, 'queue-row'); row.append(icon('file'));
     const file = node('div', undefined, 'queue-file'); file.append(node('strong', entry.name));
     const meta = node('div', undefined, 'queue-meta'); meta.append(node('span', entry.item), node('span', bytes(entry.size))); file.append(meta);
-    if (!android && entry.destination) file.append(pathLabel(entry.destination));
+    if (state.snapshot.settings.locationsSupported && entry.destination) file.append(pathLabel(entry.destination));
     const progress = node('div', undefined, 'progress'); const fill = node('span');
     progress.append(fill); file.append(progress, node('div', '', 'queue-detail'));
     const settings = iconButton('settings', 'Open S3 settings', () => { $('settings-button').click(); $('access-key').focus(); });
@@ -248,7 +248,7 @@ async function refresh() {
     $('source-count').textContent = state.snapshot.sources.length; $('library-count').textContent = (state.libraryKey ? state.files.length : state.snapshot.count).toLocaleString(); $('queue-count').textContent = state.snapshot.queue.length;
     $('activity').textContent = state.snapshot.activity; $('busy-label').textContent = state.snapshot.busy ? state.snapshot.activity : '';
     const defaultPath = state.snapshot.settings.destination;
-    $('destination').textContent = !android && state.snapshot.settings.locationsSupported ? `Default: ${middlePath(defaultPath, 70)}` : defaultPath;
+    $('destination').textContent = state.snapshot.settings.locationsSupported ? `Default: ${middlePath(defaultPath, 70)}` : defaultPath;
     $('destination').title = defaultPath;
     renderLocations();
     $('connection').textContent = consoleTarget ? 'Console connected' : 'Local service'; $('connection-light').classList.add('online');
@@ -410,7 +410,7 @@ async function submitClean(event) {
 }
 function renderLocations() {
   const settings = state.snapshot.settings;
-  const supported = !android && !!settings.locationsSupported;
+  const supported = !!settings.locationsSupported;
   $('library-location-control').hidden = !supported; $('download-locations').hidden = !supported;
   $('legacy-download-folder').hidden = supported; $('destination-input').required = !supported;
   if (!supported) return;

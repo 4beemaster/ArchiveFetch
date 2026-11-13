@@ -16,14 +16,14 @@ Working plan; versions and details can still change.
 
 ## Next
 
-- Android release signing.
+- **1.0.0-beta.1**: existing-feature parity across Windows, Android and PS5, including Windows/Android archive extraction and platform storage/cleanup gaps. Release follows completed regression, safety, upgrade and release-candidate testing, not an elapsed-time bake-in period.
 
 ## 1.0.0
 
-- The PS5, Windows and Android versions feature-matched and in use for a while.
+- The PS5, Windows and Android versions feature-matched and fully tested, including published upgrade verification and two clean release-candidate cycles. Android retains its existing signing identity.
 
 ## Later
 
+- Android release signing (deferred; preserving compatibility with current installations).
 - Drive and network-share folders as sources (local/USB drives first; SMB, FTP and NFS once there is a share to test against).
 - List an archive's contents before downloading it.
-- Archive extraction in the Windows and Android apps.

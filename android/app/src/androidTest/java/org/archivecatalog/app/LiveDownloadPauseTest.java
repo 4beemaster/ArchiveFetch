@@ -71,6 +71,12 @@ public final class LiveDownloadPauseTest {
             if (file.getName().startsWith(LARGE + ".part")) bytes += file.length();
         return bytes;
     }
+    private static File partialDirectory(File downloads, String destination) throws Exception {
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(destination.getBytes(StandardCharsets.UTF_8));
+        StringBuilder name = new StringBuilder();
+        for (byte value : digest) name.append(String.format(java.util.Locale.ROOT, "%02x", value & 255));
+        return new File(new File(downloads, ".staging"), name.toString());
+    }
     private static void removeFixture(File file) throws Exception {
         File[] children = file.listFiles();
         if (children != null) for (File child : children) removeFixture(child);
@@ -113,7 +119,9 @@ public final class LiveDownloadPauseTest {
         assertFalse(started.toString(), started.has("error"));
         token = new JSONObject(NativeBridge.request("/session", "{}", "")).getString("token");
         try {
-            command(new JSONObject().put("action", "settings").put("destination", downloads.getAbsolutePath())
+            String destination = request("/api/state").getJSONObject("settings").getString("destination");
+            File partials = partialDirectory(downloads, destination);
+            command(new JSONObject().put("action", "settings").put("destination", destination)
                 .put("output", new File(root, "exports").getAbsolutePath()).put("automatic", false)
                 .put("connections", connections).put("remember", false).put("excludedExtensions", ""));
             String xml = "<catalog complete=\"true\"><item id=\"" + ITEM + "\"/>"
@@ -140,11 +148,12 @@ public final class LiveDownloadPauseTest {
             assertEquals("Paused", entry(state, LARGE).getString("status"));
             assertEquals("Paused", entry(state, SMALL).getString("status"));
             assertEquals(2, state.getJSONArray("queue").length());
-            long saved = partialBytes(downloads);
+            long saved = partialBytes(partials);
             assertTrue("Real network bytes must remain on disk", saved > 0 && saved < 80501772);
+            android.util.Log.i("LivePause", "connections=" + connections + " held partial bytes=" + saved);
             action("start", 0);
             await(value -> !value.optBoolean("downloading"), 10000);
-            assertEquals("Start must not release individual holds", saved, partialBytes(downloads));
+            assertEquals("Start must not release individual holds", saved, partialBytes(partials));
             action("resumeQueue", largeId);
             state = await(value -> !value.optBoolean("downloading"), 600000);
             assertEquals(1, state.getJSONArray("queue").length());
@@ -160,7 +169,12 @@ public final class LiveDownloadPauseTest {
                 String expected = name.equals(LARGE) ? "d49b74d719953fab5bc31e80bf8232271ca9f6ee"
                     : name.equals(SMALL) ? "62eaef5b1bf1d9b6ef0f86c29f78bfc4ec6c164c"
                     : name.equals(NEXT) ? "a446c101397896516176f7415f3ff6afb3b837bc" : "";
-                if (!expected.isEmpty()) { assertEquals(expected, hash(target, file.getString("uri"))); checked++; }
+                if (!expected.isEmpty()) {
+                    String actual = hash(target, file.getString("uri"));
+                    assertEquals(expected, actual);
+                    android.util.Log.i("LivePause", "connections=" + connections + " public file=" + name + " SHA1=" + actual);
+                    checked++;
+                }
             }
             assertEquals("All verified files must be published through Android storage", 3, checked);
         } finally {
