@@ -14,13 +14,7 @@ Working plan; versions and details can still change.
 - **0.7.3**: app-driven console updates also replace the existing ArchiveFetch copy through itsPLK Payload Manager's own API, preserving its filename, slot and boot list. Compatible with Payload Manager 0.6.3's upload guard. Failed synchronization keeps the running update and shows a warning with Retry update. Windows gains a per-user installer with data-preserving manual upgrades.
 - **0.8.0**: manual GitHub release checks with beta-build opt-in, SHA256-verified downloads and explicit installation through the Windows/Android system installers or the PS5's local loader. PS5 updates preserve the existing Payload Manager filename, slot and boot list. Individual-download Pause/Resume retains partial data and lets the rest of the queue continue; explicitly paused files wait for Resume, while queue-wide Stop/Start behavior is unchanged. Extraction itself is not pausable. No automatic background checks or unattended installation.
 
-## Next
-
-- **1.0.0-beta.3 (release candidate 2)**: repeat full regression, safety and genuine three-platform upgrade validation after the clean first release-candidate cycle. Windows/Android extraction and Android storage/cleanup parity are implemented. Two clean release-candidate cycles are required before final 1.0.0; there is no elapsed-time bake-in requirement. Candidate tags retain the supported `-beta.N` format.
-
-## 1.0.0
-
-- The PS5, Windows and Android versions feature-matched and fully tested, including published upgrade verification and two clean release-candidate cycles. Android retains its existing signing identity.
+- **1.0.0**: existing-feature parity across Windows, Android and PS5, including native Windows/Android archive extraction, Android named locations and tag routing, destination-copy history, protected replacement and scoped cleanup, destination-isolated partials and revoked-folder recovery. Two clean release-candidate cycles include genuine published upgrades on all three platforms. Android retains its existing signing identity; production release signing remains deferred.
 
 ## Later
 
