@@ -1,6 +1,6 @@
 # ArchiveFetch
 
-Current development version: **1.0.0-beta.2 (release candidate 1)**; latest stable release: **0.8.0**. The development version is the same for the Windows, Android and PS5 apps. It lives in the `VERSION` file, which every build reads; the apps show it next to the ArchiveFetch name. Android's version code is derived from it (0.6.0-beta.1 = 6001, the 0.6.0 release = 6099) so each build installs over the earlier ones. Beta versions indicate ongoing validation, not a final release. Release candidates retain the supported `-beta.N` tag format so existing installations can discover them.
+Current development version: **1.0.0-beta.3 (release candidate 2)**; latest stable release: **0.8.0**. The development version is the same for the Windows, Android and PS5 apps. It lives in the `VERSION` file, which every build reads; the apps show it next to the ArchiveFetch name. Android's version code is derived from it (0.6.0-beta.1 = 6001, the 0.6.0 release = 6099) so each build installs over the earlier ones. Beta versions indicate ongoing validation, not a final release. Release candidates retain the supported `-beta.N` tag format so existing installations can discover them.
 
 A Windows/Android HTML interface, a PS5 app served to the console browser and local network, desktop command-line client, and legacy headless PS5 ELF payload for combining Internet Archive file manifests and downloading explicitly selected files. The interfaces reuse the native catalog and download worker model.
 
