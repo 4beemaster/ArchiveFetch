@@ -16,7 +16,7 @@ Working plan; versions and details can still change.
 
 ## Next
 
-- **1.0.0-beta.1**: existing-feature parity across Windows, Android and PS5, including Windows/Android archive extraction and platform storage/cleanup gaps. Release follows completed regression, safety, upgrade and release-candidate testing, not an elapsed-time bake-in period.
+- **1.0.0-beta.2 (release candidate 1)**: validate the implemented Windows/Android extraction and Android storage/cleanup parity after beta.1's genuine three-platform upgrades. Two clean release-candidate cycles are required before final 1.0.0; there is no elapsed-time bake-in requirement. Candidate tags retain the supported `-beta.N` format.
 
 ## 1.0.0
 
