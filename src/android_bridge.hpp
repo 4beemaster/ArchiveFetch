@@ -418,6 +418,7 @@ Java_org_archivecatalog_app_NativeBridge_request(JNIEnv* environment, jclass, js
                 }
             } else throw std::runtime_error("Unknown app request");
         }
+        android_app->debug_trace("NATIVE_REQUEST", {{"route", route.substr(0, route.find('?'))}, {"failed", result.contains("error")}});
         return environment->NewStringUTF(result.dump(-1, ' ', true).c_str());
     } catch (const std::exception& failure) {
         return environment->NewStringUTF(Json({{"error", failure.what()}}).dump(-1, ' ', true).c_str());

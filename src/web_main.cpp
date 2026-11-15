@@ -172,6 +172,7 @@ int main(int argc, char** argv) {
         std::function<void()> close_update_window;
 #endif
         server.set_logger([&](const httplib::Request& request, const httplib::Response& response) {
+            application.debug_trace("HTTP_REQUEST", {{"method", request.method}, {"route", request.path}, {"status", response.status}});
             if (request.method == "POST" && request.path == "/api/shutdown" && response.status == 200) { application.model.cancel(); server.stop(); }
 #ifdef _WIN32
             if (request.method == "POST" && request.path == "/api/command" && response.status == 200 &&

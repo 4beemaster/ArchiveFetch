@@ -23,8 +23,8 @@ function middlePath(path, limit = 52) {
   const start = Math.floor((limit - 1) * .4);
   return `${path.slice(0, start)}\u2026${path.slice(-(limit - start - 1))}`;
 }
-function pathLabel(path, limit = 52) {
-  const label = node('span', middlePath(path, limit), 'download-path');
+function pathLabel(path) {
+  const label = node('span', path, 'download-path');
   label.title = path; label.setAttribute('aria-label', path); return label;
 }
 function filename(file) { return file.name.slice(file.name.lastIndexOf('/') + 1); }

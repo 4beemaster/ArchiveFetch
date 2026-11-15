@@ -21,6 +21,7 @@
 #include <sstream>
 #include <chrono>
 #include <algorithm>
+#include <atomic>
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -195,6 +196,8 @@ public:
     std::uint64_t saved_sources = 0;
     std::string error;
     bool remember = false;
+    std::atomic<bool> debug_logging{false};
+    std::function<void(const char*, const Json&)> debug_sink;
     bool favorites_writable = true;
     std::mutex download_state_mutex;
     Json download_state;
@@ -232,6 +235,7 @@ public:
             }
             saved_sources = model.snapshot().source_revision;
         } catch (const std::exception& failure) { error = failure.what(); sources.clear(); }
+        debug_logging.store(config.debug_logging);
         auto library = root / "library.xml";
         if (!std::filesystem::exists(library) && isolated.empty()) library = config.output_dir / "catalog.xml";
         if (std::filesystem::exists(library)) { model.import_catalog(library); model.wait(); }
@@ -372,7 +376,8 @@ public:
 
     Json settings_json() {
         std::lock_guard<std::mutex> guard(download_state_mutex);
-        return {{"destination", config.download_dir.u8string()}, {"output", config.output_dir.u8string()},
+        return {{"destination", platform_storage ? config.download_dir.u8string() : std::filesystem::absolute(config.download_dir).lexically_normal().u8string()},
+            {"output", std::filesystem::absolute(config.output_dir).lexically_normal().u8string()}, {"debugLogging", config.debug_logging},
             {"locations", download_state.at("locations")}, {"defaultLocation", download_state.at("default")}, {"lastLocation", download_state.at("last")},
             {"locationRevision", location_revision}, {"locationsWritable", download_state_writable},
             {"locationsSupported", named_locations_supported},
@@ -387,6 +392,7 @@ public:
     }
 
     Json library(bool include_hidden = false) {
+        const auto started = std::chrono::steady_clock::now();
         auto state = model.snapshot();
         auto status = platform_storage ? std::vector<bool>(state.catalog.files.size(), false) : library_download_status(state.catalog.files, config.download_dir);
         std::lock_guard<std::mutex> guard(download_state_mutex);
@@ -432,6 +438,23 @@ public:
         for (const auto& source : state.sources) { tags[item_id(source.url)] = source.tags; source_items.insert(item_id(source.url)); }
         std::map<std::string, const SourceCollection*> grouped;
         for (const auto& collection : collections) for (const auto& item : collection.items) grouped[item] = &collection;
+        struct PlatformListing { std::map<std::string, std::vector<Json>> files; };
+        std::vector<PlatformListing> platform_listings;
+        if (platform_storage && !state.catalog.files.empty()) {
+            std::set<std::string> locations;
+            for (const auto& location : updated.at("locations")) locations.insert(location.at("path").get<std::string>());
+            for (const auto& location : locations) {
+                try {
+                    PlatformListing listing;
+                    const auto entries = platform_storage({{"action", "list"}, {"tree", location}, {"metadataOnly", true}});
+                    for (const auto& entry : entries.at("files"))
+                        listing.files[entry.at("name").get<std::string>()].push_back(entry);
+                    platform_listings.push_back(std::move(listing));
+                } catch (const std::exception& failure) {
+                    std::cerr << "[storage] Cannot inspect download location: " << failure.what() << '\n';
+                }
+            }
+        }
         Json result = Json::array();
         for (std::size_t index = 0; index < state.catalog.files.size(); ++index) {
             auto value = file_json(state.catalog.files[index]);
@@ -488,27 +511,19 @@ public:
                 if (copy_status == "Downloaded" || copy_status == "Extracted") present = true;
             }
             if (platform_storage && copies.empty() && basenames[target.filename().u8string()] == 1) {
-                std::set<std::string> locations;
-                for (const auto& location : updated.at("locations")) locations.insert(location.at("path").get<std::string>());
-                for (const auto& location : locations) {
-                    Json found;
-                    try {
-                        found = platform_storage({{"action", "discover"}, {"tree", location},
-                            {"name", std::filesystem::u8path(file.name).filename().u8string()}, {"size", file.size}, {"sha1", file.sha1}, {"md5", file.md5}, {"metadataOnly", true}});
-                    } catch (const std::exception& failure) {
-                        std::cerr << "[storage] Cannot inspect download location: " << failure.what() << '\n';
+                for (const auto& listing : platform_listings) {
+                    const auto found = listing.files.find(target.filename().u8string());
+                    if (found == listing.files.end()) continue;
+                    if (found->second.size() != 1) {
+                        std::cerr << "[storage] Cannot inspect download location: Ambiguous duplicate destination names\n";
                         continue;
                     }
-                    if (!found.at("found").get<bool>()) continue;
-                    const auto path = found.at("path").get<std::string>();
+                    const auto& entry = found->second.front();
+                    if (entry.at("size") != file.size) continue;
+                    const auto path = entry.at("path").get<std::string>();
                     if (recorded_paths.count(path)) continue;
-                    if (found.contains("record") && download_state_writable) {
-                        auto record = found.at("record");
-                        record["item"] = file.item; record["name"] = file.name; record["size"] = file.size;
-                        updated["records"].push_back(record); recorded_paths.insert(path); adopted = true;
-                    }
-                    copies.push_back({{"path", path}, {"status", found.at("status")}});
-                    if (!present) { downloaded_path = path; download_status = found.at("status"); }
+                    copies.push_back({{"path", path}, {"status", "Unrecorded"}});
+                    if (!present) { downloaded_path = path; download_status = "Unrecorded"; }
                     present = true;
                 }
             }
@@ -540,7 +555,16 @@ public:
             result.push_back(value);
         }
         if (adopted) commit_download_state(std::move(updated));
+        debug_trace("LIBRARY_REFRESH", {{"catalogFiles", state.catalog.files.size()}, {"visibleFiles", result.size()},
+            {"locationsListed", platform_storage ? platform_listings.size() : listings.size()},
+            {"elapsedMs", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count()}});
         return {{"revision", state.catalog_revision}, {"sourceRevision", state.source_revision}, {"tagRevision", tag_revision}, {"files", result}};
+    }
+
+    void debug_trace(const char* event, const Json& details) {
+        if (!debug_logging.load()) return;
+        if (debug_sink) debug_sink(event, details);
+        else std::cerr << "[debug] " << event << ' ' << details.dump() << '\n';
     }
 
     void commit_download_state(Json next) {
@@ -1264,6 +1288,7 @@ public:
         next.output_dir = std::filesystem::u8path(value.at("output").get<std::string>());
         next.ca_bundle = value.value("ca", config.ca_bundle);
         next.automatically_start_downloads = value.at("automatic").get<bool>();
+        next.debug_logging = value.value("debugLogging", config.debug_logging);
         next.extract_archives = value.value("extractArchives", config.extract_archives);
         next.delete_extracted_archives = value.value("deleteExtracted", config.delete_extracted_archives);
         if (value.contains("connections")) {
@@ -1294,6 +1319,7 @@ public:
             commit_download_state(std::move(next_locations));
         }
         config = std::move(next); remember = keep;
+        debug_logging.store(config.debug_logging);
     }
 
     // Keys are never written here; they live in the credential store.
@@ -1311,6 +1337,7 @@ public:
         property("download_connections", std::to_string(next.download_connections));
         property("excluded_extensions", format_extension_list(next.excluded_extensions));
         property("follow_parts", next.follow_parts ? "true" : "false"); property("debug_window", next.debug_window ? "true" : "false");
+        property("debug_logging", next.debug_logging ? "true" : "false");
         for (const auto& source : model.snapshot().sources) {
             auto* child = xmlNewChild(node, nullptr, BAD_CAST "source", nullptr);
             xmlNewProp(child, BAD_CAST "url", BAD_CAST source.url.c_str());
@@ -1469,7 +1496,7 @@ public:
                 start_downloads(id);
             }
             else if (action == "export") model.export_files(config.output_dir);
-            else if (action == "chooseDirectory") return {{"path", choose_directory()}};
+            else if (action == "chooseDirectory") return {{"path", choose_directory(value.value("initial", ""))}};
             else if (action == "chooseCatalog") return {{"path", choose_file(true)}};
             else if (action == "import") model.import_catalog(std::filesystem::u8path(value.at("path").get<std::string>()));
             else if (action == "addLocation" || action == "editLocation" || action == "removeLocation" || action == "defaultLocation" || action == "useLocation") return location_command(action, value);

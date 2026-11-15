@@ -624,7 +624,12 @@ final class DownloadStorage {
         if (action.equals("list")) {
             JSONArray files = new JSONArray();
             for (JSONObject file : destination.children(destination.root, "")) if (!file.getBoolean("directory") &&
-                (!destination.media || (file.getString("relative").isEmpty() && file.getBoolean("owned")))) files.put(file);
+                (!destination.media || (file.getString("relative").isEmpty() &&
+                    (request.optBoolean("metadataOnly") || file.getBoolean("owned"))))) {
+                if (request.optBoolean("metadataOnly"))
+                    file.put("path", destination.local ? Uri.parse(file.getString("uri")).getPath() : file.getString("uri"));
+                files.put(file);
+            }
             return new JSONObject().put("files", files);
         }
         if (action.equals("exists")) {

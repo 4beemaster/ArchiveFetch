@@ -22,7 +22,7 @@ public final class StorageFixtureControlProvider extends ContentProvider {
             throw new IllegalStateException("Instrumentation target is not installed", failure);
         }
         switch (method) {
-            case "fixtureCreate": case "fixtureWrite": case "fixtureFailures": case "fixtureRevoke": case "fixtureGrant": case "fixtureRemove":
+            case "fixtureCreate": case "fixtureWrite": case "fixtureFailures": case "fixtureRevoke": case "fixtureGrant": case "fixtureRemove": case "fixtureQueryCount":
                 break;
             default: throw new IllegalArgumentException("Unknown fixture control operation");
         }

@@ -17,6 +17,7 @@ import java.util.UUID;
 public final class StorageFixtureProvider extends DocumentsProvider {
     private File base;
     private volatile boolean failRename, failDelete, failWrite, failRead, failChildren;
+    private final java.util.concurrent.atomic.AtomicInteger childQueries = new java.util.concurrent.atomic.AtomicInteger();
     @Override public boolean onCreate() {
         try { base = new File(getContext().getFilesDir(), "storage-fixtures").getCanonicalFile(); }
         catch (java.io.IOException failure) { throw new IllegalStateException("Cannot resolve fixture storage root", failure); }
@@ -62,6 +63,7 @@ public final class StorageFixtureProvider extends DocumentsProvider {
         MatrixCursor cursor = new MatrixCursor(columns(projection)); row(cursor, file); return cursor;
     }
     @Override public Cursor queryChildDocuments(String parentDocumentId, String[] projection, String sortOrder) throws FileNotFoundException {
+        childQueries.incrementAndGet();
         if (failChildren) throw new FileNotFoundException("Injected fixture directory enumeration failure");
         File[] children = file(parentDocumentId).listFiles();
         if (children == null) throw new FileNotFoundException(parentDocumentId);
@@ -114,6 +116,8 @@ public final class StorageFixtureProvider extends DocumentsProvider {
             } else if ("fixtureWrite".equals(method)) {
                 File target = file(argument);
                 Files.write(target.toPath(), extras.getString("text").getBytes(StandardCharsets.UTF_8));
+            } else if ("fixtureQueryCount".equals(method)) {
+                result.putInt("children", childQueries.getAndSet(0));
             } else if ("fixtureFailures".equals(method)) {
                 failRename = extras.getBoolean("rename"); failDelete = extras.getBoolean("delete"); failWrite = extras.getBoolean("write");
                 failRead = extras.getBoolean("read"); failChildren = extras.getBoolean("children");

@@ -426,7 +426,7 @@ public final class NativeIntegrationTest {
             device.waitForIdle();
             waitScript(instrumentation, web.get(), "state.view === 'downloads' && window.lifecycleMarker === 'retained' && state.token === window.lifecycleSession && !!state.snapshot && !busy() && document.querySelector('#connection').textContent === 'Local service'", 10000);
             script(instrumentation, web.get(), "view('library'); true");
-            script(instrumentation, web.get(), "document.querySelector('#debug-button').click(); true");
+            script(instrumentation, web.get(), "document.querySelector('#settings-button').click(); document.querySelector('#debug-button').click(); true");
             waitScript(instrumentation, web.get(), "document.querySelector('#diagnostics').textContent.includes('[android] App version=')", 10000);
             assertEquals("true", script(instrumentation, web.get(), "!document.querySelector('#diagnostics').textContent.includes('[tls]') && !document.querySelector('#diagnostics').textContent.includes('CA readable=') && !document.querySelector('#diagnostics').textContent.includes('Cannot load CA certificate bundle')"));
             Bitmap diagnostics = instrumentation.getUiAutomation().takeScreenshot();
@@ -451,7 +451,10 @@ public final class NativeIntegrationTest {
             assertNotNull(screenshot);
             try (FileOutputStream image = new FileOutputStream(new File(target.getExternalFilesDir(null), "android-ui.png"))) { screenshot.compress(Bitmap.CompressFormat.PNG, 100, image); }
             screenshot.recycle();
-            script(instrumentation, web.get(), "document.querySelector('#settings-button').click(); document.querySelector('.browse[data-input=\"destination-input\"]').click(); true");
+            script(instrumentation, web.get(), "document.querySelector('#settings-button').click(); setFolderPath('destination-input', ''); document.querySelector('.browse[data-input=\"destination-input\"]').click(); true");
+            UiObject2 downloadsFolder = device.wait(Until.findObject(By.text("Download")), 15000);
+            assertNotNull("Shared-storage root was not offered by Android's picker", downloadsFolder);
+            downloadsFolder.click();
             UiObject2 folder = device.wait(Until.findObject(By.text("ArchiveCatalogTest")), 15000);
             assertNotNull("Download folder was not offered by Android's picker", folder);
             // The picker redraws its list while loading, which can invalidate a found row before the click.
@@ -532,7 +535,7 @@ public final class NativeIntegrationTest {
     private static String stateToken(Instrumentation instrumentation, WebView web) throws Exception {
         return new org.json.JSONTokener(script(instrumentation, web, "state.token")).nextValue().toString();
     }
-    private static WebView findWeb(View view) {
+    static WebView findWeb(View view) {
         if (view instanceof WebView) return (WebView) view;
         if (view instanceof ViewGroup) {
             ViewGroup group = (ViewGroup) view;
@@ -540,13 +543,13 @@ public final class NativeIntegrationTest {
         }
         return null;
     }
-    private static String script(Instrumentation instrumentation, WebView web, String code) throws Exception {
+    static String script(Instrumentation instrumentation, WebView web, String code) throws Exception {
         AtomicReference<String> result = new AtomicReference<>(); CountDownLatch completed = new CountDownLatch(1);
         instrumentation.runOnMainSync(() -> web.evaluateJavascript(code, value -> { result.set(value); completed.countDown(); }));
         assertTrue("WebView evaluation timed out", completed.await(10, TimeUnit.SECONDS));
         return result.get();
     }
-    private static void waitScript(Instrumentation instrumentation, WebView web, String code, long timeout) throws Exception {
+    static void waitScript(Instrumentation instrumentation, WebView web, String code, long timeout) throws Exception {
         long deadline = SystemClock.elapsedRealtime() + timeout;
         do { if ("true".equals(script(instrumentation, web, code))) return; Thread.sleep(100); }
         while (SystemClock.elapsedRealtime() < deadline);

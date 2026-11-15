@@ -137,7 +137,7 @@ Config read_config(const std::filesystem::path& path, bool allow_empty_sources) 
     }
     config.automatically_start_downloads = automatic != "false";
     for (const auto& [name, target] : {std::pair<const char*, bool*>{"extract_archives", &config.extract_archives},
-             {"delete_extracted_archives", &config.delete_extracted_archives}}) {
+             {"delete_extracted_archives", &config.delete_extracted_archives}, {"debug_logging", &config.debug_logging}}) {
         const auto value = attribute(root, name);
         if (!value.empty() && value != "true" && value != "false") throw std::runtime_error(std::string(name) + " must be true or false");
         *target = value == "true";

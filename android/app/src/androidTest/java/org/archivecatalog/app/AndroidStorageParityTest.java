@@ -96,6 +96,66 @@ public final class AndroidStorageParityTest {
         }
         throw new AssertionError("Native fixture did not become idle");
     }
+    @Test public void largeCatalogListsEachLocationOnce() throws Exception {
+        Context instrumentation = InstrumentationRegistry.getInstrumentation().getContext();
+        Uri authority = Uri.parse("content://" + instrumentation.getPackageName() + ".storage-fixture-control");
+        Bundle created = target.getContentResolver().call(authority, "fixtureCreate", null, null);
+        assertNotNull(created);
+        Uri tree = Uri.parse(created.getString("tree"));
+        target.getContentResolver().takePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        Uri root = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree));
+        Uri existing = DocumentsContract.createDocument(target.getContentResolver(), root, "application/octet-stream", "fixture-0.bin");
+        assertNotNull(existing);
+        try (java.io.OutputStream output = target.getContentResolver().openOutputStream(existing)) {
+            assertNotNull(output); output.write("abc".getBytes(StandardCharsets.UTF_8));
+        }
+        try (Fixture fixture = new Fixture(target)) {
+            NativeBridge.initialize(fixture.context);
+            StringBuilder catalog = new StringBuilder("<catalog complete=\"true\"><item id=\"reload-fixture\"/>");
+            for (int index = 0; index < 1000; ++index)
+                catalog.append("<file item=\"reload-fixture\" name=\"fixture-").append(index)
+                    .append(".bin\" size=\"3\" sha1=\"a9993e364706816aba3e25717850c26c9cd0d89d\" restricted=\"false\"/>");
+            catalog.append("</catalog>");
+            Files.write(new File(fixture.root, "import.xml").toPath(), catalog.toString().getBytes(StandardCharsets.UTF_8));
+            File ca = new File(fixture.root, "trust.pem");
+            assertFalse(new JSONObject(NativeBridge.start(fixture.root.getAbsolutePath(), fixture.downloads.getAbsolutePath(), ca.getAbsolutePath())).has("error"));
+            String token = new JSONObject(NativeBridge.request("/session", "{}", "")).getString("token");
+            try {
+                command(token, new JSONObject().put("action", "settings").put("destination", fixture.downloads.getAbsolutePath())
+                    .put("output", new File(fixture.root, "exports").getAbsolutePath()).put("ca", ca.getAbsolutePath()).put("automatic", false));
+                command(token, new JSONObject().put("action", "addLocation").put("name", "Reload fixture").put("path", tree.toString()));
+                command(token, new JSONObject().put("action", "import").put("path", new File(fixture.root, "import.xml").getAbsolutePath()));
+                idle(token);
+                target.getContentResolver().call(authority, "fixtureQueryCount", null, null);
+                long started = android.os.SystemClock.elapsedRealtime();
+                JSONObject library = new JSONObject(NativeBridge.request("/api/library", "{}", token));
+                long elapsed = android.os.SystemClock.elapsedRealtime() - started;
+                Bundle queries = target.getContentResolver().call(authority, "fixtureQueryCount", null, null);
+                assertNotNull(queries);
+                System.out.println("Large catalog: files=1000, childQueries=" + queries.getInt("children") + ", elapsedMs=" + elapsed);
+                assertFalse(library.optString("error"), library.has("error"));
+                JSONArray files = library.getJSONArray("files");
+                assertEquals(1000, files.length());
+                assertTrue(files.getJSONObject(0).getBoolean("downloaded"));
+                assertEquals("Unrecorded", files.getJSONObject(0).getString("downloadState"));
+                assertFalse(files.getJSONObject(999).getBoolean("downloaded"));
+                assertEquals("A library refresh must enumerate each location once, not once per catalog file", 1, queries.getInt("children"));
+                assertTrue("Large catalog refresh exceeded 5 seconds: " + elapsed, elapsed < 5000);
+                try (java.io.OutputStream output = target.getContentResolver().openOutputStream(existing, "wt")) {
+                    assertNotNull(output); output.write("changed".getBytes(StandardCharsets.UTF_8));
+                }
+                JSONObject refreshed = new JSONObject(NativeBridge.request("/api/library", "{}", token));
+                assertFalse(refreshed.getJSONArray("files").getJSONObject(0).getBoolean("downloaded"));
+                Bundle refreshedQueries = target.getContentResolver().call(authority, "fixtureQueryCount", null, null);
+                assertNotNull(refreshedQueries);
+                assertEquals(1, refreshedQueries.getInt("children"));
+            } finally { NativeBridge.stop(token); }
+        } finally {
+            assertTrue(DocumentsContract.deleteDocument(target.getContentResolver(), existing));
+            target.getContentResolver().releasePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            target.getContentResolver().call(authority, "fixtureRemove", tree.toString(), null);
+        }
+    }
     @Test public void namedSafLocationRoutingPersistenceAndConfirmationCleanup() throws Exception {
         Context instrumentation = InstrumentationRegistry.getInstrumentation().getContext();
         Uri authority = Uri.parse("content://" + instrumentation.getPackageName() + ".storage-fixture-control");

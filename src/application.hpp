@@ -31,6 +31,7 @@ struct Config {
     // Hides files of these types from the Library unless they are downloaded; the catalog keeps them.
     std::vector<std::string> excluded_extensions = default_excluded_extensions();
     bool debug_window = false;
+    bool debug_logging = false;
     std::vector<Selection> downloads;
 };
 

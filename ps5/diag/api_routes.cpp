@@ -503,6 +503,7 @@ httplib::Server::Handler guarded(bool needs_session, ApiHandler handler) {
             return;
         }
         handler(request, response);
+        application->debug_trace("HTTP_REQUEST", {{"method", request.method}, {"route", request.path}, {"status", response.status}});
     };
 }
 
@@ -570,6 +571,10 @@ bool api_init(const char* data_root) {
         const std::string embedded_ca = install_ca_bundle(data_root);
         auto log = std::make_unique<DiagnosticLog>();
         auto app = std::make_unique<WebApplication>(root);
+        app->debug_sink = [](const char* event, const Json& details) {
+            const auto text = details.dump();
+            log_event(event, {field("metrics", text.c_str())});
+        };
         app->extract = run_extraction;
         // curl's compiled-in default CA file does not exist on the console; a path set in Settings still wins.
         const char* ca_source = "settings";

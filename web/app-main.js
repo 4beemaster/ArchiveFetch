@@ -94,7 +94,7 @@ $('settings-button').addEventListener('click', () => {
   if (!state.snapshot) return;
   const settings = state.snapshot.settings;
   $('location-preference').value = settings.locationPreference || 'auto';
-  $('destination-input').value = settings.destination; $('output-input').value = settings.output;
+  setFolderPath('destination-input', settings.destination); setFolderPath('output-input', settings.output);
   $('automatic').checked = settings.automatic; $('remember').checked = settings.remember;
   $('connections').replaceChildren(...Array.from({ length: settings.maxConnections || 1 }, (_, index) => node('option', String(index + 1))));
   $('connections').value = String(settings.connections || 1);
@@ -106,7 +106,7 @@ $('settings-button').addEventListener('click', () => {
   $('password-new').value = ''; $('password-repeat').value = ''; passwordError('');
   if (remoteAccess) loadRemoteAccess();
   if (logFile) loadLogSize();
-  if (hostLogging) $('host-log-level').value = hostLogging.configured;
+  $('host-log-level').value = settings.debugLogging ? 'DEBUG' : 'INFO';
   $('auth-status').textContent = settings.authenticated ? (settings.remember ? 'Saved keys loaded' : 'Session keys loaded') : 'Not configured';
   $('access-key').placeholder = settings.authenticated ? 'Unchanged' : ''; $('secret-key').placeholder = settings.authenticated ? 'Unchanged' : '';
   $('access-key').value = ''; $('secret-key').value = ''; $('settings-error').hidden = true; $('text-size').value = savedTextSize(); $('settings-dialog').showModal();
@@ -220,8 +220,22 @@ document.querySelectorAll('.close-dialog').forEach(button => button.addEventList
 $('settings-dialog').addEventListener('close', () => { $('access-key').value = ''; $('secret-key').value = ''; loadLibrary(true).catch(error => fail(error.message)); });
 document.querySelectorAll('.browse').forEach(button => button.addEventListener('click', async () => {
   if (folderBrowser) { await openFolderBrowser(button.dataset.input); return; }
-  const result = await run('chooseDirectory', { purpose: button.dataset.input }); if (result?.path) $(button.dataset.input).value = result.path;
+  const result = await run('chooseDirectory', { purpose: button.dataset.input, initial: $(button.dataset.input).value.trim() });
+  if (result?.path) setFolderPath(button.dataset.input, result.path);
 }));
+const pathWidths = new WeakMap();
+const pathResizeObserver = new ResizeObserver(entries => {
+  for (const { target, contentRect } of entries) {
+    if (contentRect.width > 0 && pathWidths.get(target) !== contentRect.width) {
+      pathWidths.set(target, contentRect.width);
+      fitPath(target);
+    }
+  }
+});
+document.querySelectorAll('.full-path').forEach(input => {
+  input.addEventListener('input', () => fitPath(input));
+  pathResizeObserver.observe(input);
+});
 $('settings-form').addEventListener('submit', async event => {
   event.preventDefault();
   try {
@@ -230,9 +244,9 @@ $('settings-form').addEventListener('submit', async event => {
       automatic: $('automatic').checked, remember: $('remember').checked, connections: Number($('connections').value),
       ...(state.snapshot.settings.extractSupported ? { extractArchives: $('extract-archives').checked, deleteExtracted: $('delete-extracted').checked } : {}),
       excludedExtensions: $('excluded-extensions').value,
+      debugLogging: $('host-log-level').value === 'DEBUG',
       access: $('access-key').value, secret: $('secret-key').value });
     if (result?.ok) {
-      if (hostLogging) hostLogging = await request('/api/logging', { level: $('host-log-level').value });
       $('settings-dialog').close();
     }
   } catch (error) { $('settings-error').textContent = error.message; $('settings-error').hidden = false; }
@@ -354,13 +368,14 @@ async function loadLogEntries() {
     logBytes = result.bytes; renderLogEntries();
   } catch (error) { $('log-summary').textContent = error.message; }
 }
-$('open-console-log').addEventListener('click', () => {
+function openConsoleLog() {
   $('log-search').value = ''; $('log-body').replaceChildren(); $('log-summary').textContent = 'Loading...';
   $('log-dialog').showModal(); loadLogEntries();
-});
+}
 $('refresh-log').addEventListener('click', loadLogEntries);
 $('log-search').addEventListener('input', renderLogEntries);
 $('add-location').addEventListener('click', () => openLocation());
+$('configure-download-locations').addEventListener('click', () => { renderLocations(); $('locations-dialog').showModal(); });
 $('clean-downloads').addEventListener('click', async () => {
   try {
     await loadLibrary(true);
@@ -409,7 +424,10 @@ $('routing-dialog').addEventListener('close', () => { routingAnswer?.(null); rou
 $('confirm-accept').addEventListener('click', () => answerConfirmation(true)); $('confirm-cancel').addEventListener('click', () => answerConfirmation(false));
 $('confirm-dialog').addEventListener('cancel', event => { event.preventDefault(); answerConfirmation(false); });
 $('reload-interface').addEventListener('click', () => location.reload());
-$('debug-button').addEventListener('click', () => { $('debug-dialog').showModal(); renderDiagnostics(); });
+$('debug-button').addEventListener('click', () => {
+  if (logFile) openConsoleLog();
+  else { $('debug-dialog').showModal(); renderDiagnostics(); }
+});
 $('copy-diagnostics').addEventListener('click', async () => {
   try {
     if (android) await request('/api/clipboard', { text: $('diagnostics').textContent });
@@ -490,14 +508,23 @@ async function loadFolder(path) {
   } catch (error) { $('folder-error').textContent = error.message; $('folder-error').hidden = false; return false; }
 }
 async function openFolderBrowser(input) {
-  folderState.input = input; $('folder-new-name').value = '';
+  folderState.input = input; folderState.path = ''; folderState.parent = ''; $('folder-new-name').value = '';
+  $('folder-up').disabled = $('folder-choose').disabled = $('folder-create').disabled = $('folder-new-name').disabled = true;
+  $('folder-list').replaceChildren(); $('folder-current').textContent = '';
   $('folder-dialog').showModal();
-  if (!await loadFolder($(input).value.trim())) await loadFolder('');
+  const initial = $(input).value.trim();
+  if (!await loadFolder(initial) && initial) {
+    const message = $('folder-error').textContent;
+    if (await loadFolder('')) {
+      $('folder-error').textContent = `${message}. Choose an available storage location instead.`;
+      $('folder-error').hidden = false;
+    }
+  }
 }
 $('folder-up').addEventListener('click', () => loadFolder(folderState.parent));
 $('folder-choose').addEventListener('click', () => {
   if (!folderState.path) return;
-  $(folderState.input).value = folderState.path; $('folder-dialog').close();
+  setFolderPath(folderState.input, folderState.path); $('folder-dialog').close();
 });
 $('folder-create').addEventListener('click', async () => {
   const name = $('folder-new-name').value.trim();
@@ -522,7 +549,6 @@ async function reconnectNativeSession() {
 async function connect() {
   const local = await localRequest('/session'); state.token = local.token; showVersion(local);
   hostLogging = local.logging || null;
-  $('host-logging-settings').hidden = !hostLogging;
   if (hostLogging) window.ArchiveFetchDiagnostics?.connect(state.token);
   let session = local;
   if (!await startConsoles(local)) return;
@@ -530,8 +556,6 @@ async function connect() {
   $('network-button').hidden = !session.network;
   folderBrowser = !!session.folderBrowser;
   remoteAccess = !!session.remoteAccess; logFile = !!session.logFile;
-  // The console's run.log replaces the in-app diagnostics there; see Settings > Console log. Apps keep their own.
-  $('debug-button').hidden = logFile && !consoleTarget;
   await refresh();
 }
 function showLogin() {
@@ -558,6 +582,7 @@ async function start() {
   setTimeout(async function poll() { await refresh(); setTimeout(poll, 800); }, 800);
 }
 if (android) {
+  $('android-export-note').hidden = false;
   ['destination-input', 'output-input', 'location-path'].forEach(id => { $(id).readOnly = true; });
   document.querySelectorAll('.browse').forEach(button => { button.hidden = !['destination-input', 'location-path'].includes(button.dataset.input); });
 }

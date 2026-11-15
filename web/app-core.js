@@ -161,6 +161,10 @@ async function localRequest(path, data, retried = false) {
   if (nativeApp) {
     const result = await nativeRequest(path, data);
     if (result.login) throw loginRequired(result);
+    if (result.error === 'Invalid app session' && !retried && path !== '/session') {
+      await renewSession();
+      return localRequest(path, data, true);
+    }
     if (result.error && (path !== '/api/state' || !('busy' in result))) throw new Error(result.error);
     return result;
   }

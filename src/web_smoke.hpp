@@ -357,6 +357,29 @@ void console_smoke(httplib::Client& client, const httplib::Headers& headers, con
 }
 
 void web_smoke(httplib::Server& server, WebApplication& application, int port, const std::string& session) {
+    {
+        WebApplication settings(application.root / "settings-regression");
+        require(!settings.settings_json().at("debugLogging").get<bool>(), "Debug logging is opt-in");
+        require(std::filesystem::u8path(settings.settings_json().at("output").get<std::string>()).is_absolute(),
+            "The default export setting displays its full absolute path");
+        std::vector<std::string> events;
+        settings.debug_sink = [&](const char* event, const Json&) { events.push_back(event); };
+        Json values = {{"action", "settings"}, {"destination", (settings.root / "downloads").u8string()},
+            {"output", (settings.root / "exports").u8string()}, {"automatic", false}, {"debugLogging", true}};
+        settings.command(values);
+        settings.library();
+        require(events == std::vector<std::string>{"LIBRARY_REFRESH"}, "Debug adds actual library-refresh metrics");
+        WebApplication restarted(settings.root);
+        require(restarted.config.debug_logging && restarted.debug_logging.load(), "Debug logging persists across restart");
+        values["debugLogging"] = false;
+        settings.command(values);
+        settings.library();
+        require(events.size() == 1 && !settings.settings_json().at("debugLogging").get<bool>(), "Info stops verbose library tracing");
+        values["debugLogging"] = "verbose";
+        bool rejected = false;
+        try { settings.command(values); } catch (const Json::type_error&) { rejected = true; }
+        require(rejected && !settings.config.debug_logging, "Invalid logging values cannot change the current setting");
+    }
     httplib::Client client("127.0.0.1", port);
     client.set_connection_timeout(5, 0); client.set_read_timeout(10, 0);
     httplib::Headers headers{{"X-Archive-Session", session}};

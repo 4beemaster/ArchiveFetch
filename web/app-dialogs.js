@@ -248,7 +248,7 @@ async function refresh() {
     $('source-count').textContent = state.snapshot.sources.length; $('library-count').textContent = (state.libraryKey ? state.files.length : state.snapshot.count).toLocaleString(); $('queue-count').textContent = state.snapshot.queue.length;
     $('activity').textContent = state.snapshot.activity; $('busy-label').textContent = state.snapshot.busy ? state.snapshot.activity : '';
     const defaultPath = state.snapshot.settings.destination;
-    $('destination').textContent = state.snapshot.settings.locationsSupported ? `Default: ${middlePath(defaultPath, 70)}` : defaultPath;
+    $('destination').textContent = state.snapshot.settings.locationsSupported ? `Default: ${defaultPath}` : defaultPath;
     $('destination').title = defaultPath;
     renderLocations();
     $('connection').textContent = consoleTarget ? 'Console connected' : 'Local service'; $('connection-light').classList.add('online');
@@ -450,6 +450,18 @@ function renderLocations() {
   $('location-list').replaceChildren(...rows);
 }
 function locationError(message) { $('location-error').textContent = message; $('location-error').hidden = false; }
+function fitPath(input) {
+  if (!input.classList.contains('full-path')) return;
+  input.style.height = 'auto';
+  const border = input.offsetHeight - input.clientHeight;
+  input.style.height = `${input.scrollHeight + border}px`;
+  // A new dialog scrollbar can narrow the field after its first measurement.
+  if (input.scrollHeight > input.clientHeight) input.style.height = `${input.scrollHeight + border}px`;
+}
+function setFolderPath(id, value) {
+  $(id).value = value;
+  requestAnimationFrame(() => fitPath($(id)));
+}
 function renderLocationTags() {
   $('location-tags').replaceChildren(...locationTags.map(tag => {
     const chip = node('span', undefined, 'tag'); chip.append(document.createTextNode(tag), iconButton('close', `Remove location tag: ${tag}`, () => {
@@ -473,7 +485,7 @@ function openLocation(location = null, fromLibrary = false) {
   locationTags = [...(location?.tags || [])];
   $('location-title').textContent = location ? 'Edit location' : 'Add location';
   $('location-name').value = location?.name || ''; $('location-name').readOnly = location?.id === 'default';
-  $('location-path').value = location?.path || ''; $('location-tag-input').value = ''; $('location-error').hidden = true;
+  setFolderPath('location-path', location?.path || ''); $('location-tag-input').value = ''; $('location-error').hidden = true;
   $('location-extract-label').hidden = !state.snapshot.settings.extractSupported; $('location-extract').checked = !!location?.extract;
   const suggestions = new Map();
   const tags = [...state.files.flatMap(file => [...(file.tags || []), ...(file.sourceTags || [])]), ...state.snapshot.sources.flatMap(source => source.tags || [])];
@@ -488,7 +500,7 @@ function chooseRouting(conflicts) {
     const select = node('select'); select.dataset.index = conflict.index; select.required = true;
     select.add(new Option('Choose location', ''));
     for (const location of conflict.locations) {
-      const option = new Option(`${location.name} (${middlePath(location.path, 36)})`, location.id); option.title = location.path; select.add(option);
+      const option = new Option(`${location.name} (${location.path})`, location.id); option.title = location.path; select.add(option);
     }
     label.append(select); return label;
   }));

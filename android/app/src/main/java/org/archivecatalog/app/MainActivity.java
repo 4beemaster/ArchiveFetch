@@ -133,10 +133,7 @@ public final class MainActivity extends Activity {
                         pickerReply = reply; pickerId = id;
                         Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
                             Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
-                        String tree = new JSONObject(NativeBridge.storageRequest("{\"action\":\"tree\"}")).optString("tree");
-                        if (!tree.isEmpty() && android.provider.DocumentsContract.isTreeUri(Uri.parse(tree))) picker.putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI, Uri.parse(tree));
-                        else picker.putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI,
-                            android.provider.DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:Download"));
+                        picker.putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI, initialFolderUri(data.optString("initial")));
                         startActivityForResult(picker, 42);
                     } else respond(reply, id, null, "Stop downloads before choosing another folder");
                     return;
@@ -324,6 +321,18 @@ public final class MainActivity extends Activity {
                 respond(reply, id, null, failure.getMessage());
             }
         });
+    }
+    static Uri initialFolderUri(String initial) throws java.io.IOException {
+        if (initial.isEmpty())
+            return android.provider.DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:");
+        Uri uri = Uri.parse(initial);
+        if ("content".equals(uri.getScheme()) && android.provider.DocumentsContract.isTreeUri(uri)) return uri;
+        File folder = new File(initial).getCanonicalFile();
+        File storage = android.os.Environment.getExternalStorageDirectory().getCanonicalFile();
+        if (!folder.toPath().startsWith(storage.toPath()))
+            throw new IllegalArgumentException("Android cannot browse this app-private folder. Add a shared-storage location instead.");
+        String relative = storage.toPath().relativize(folder.toPath()).toString().replace(File.separatorChar, '/');
+        return android.provider.DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:" + relative);
     }
     private void showError(String message) { if (!isFinishing() && !isDestroyed()) new AlertDialog.Builder(this).setTitle("ArchiveFetch").setMessage(message).setPositiveButton("OK", null).show(); }
     private void bindCatalog() {
