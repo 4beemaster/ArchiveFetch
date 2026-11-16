@@ -60,6 +60,50 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc != 1) throw std::runtime_error("Usage: update_check_tests [--live|--live-download]");
+        {
+            std::atomic<bool> release_fetch{false};
+            std::atomic<int> calls{0};
+            UpdateCheck checker;
+            checker.fetch = [&](const std::string&, std::size_t) {
+                ++calls;
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+                while (!release_fetch && std::chrono::steady_clock::now() < deadline)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                return Json::array({release("1.0.1-beta.2"), release("1.0.0")}).dump();
+            };
+            const auto before = std::chrono::steady_clock::now();
+            const auto started = checker.start("1.0.0", "", true);
+            require(started.at("running") && std::chrono::steady_clock::now() - before < std::chrono::seconds(1),
+                "Automatic check starts without waiting for network");
+            require(checker.start("1.0.0", "", true).at("running"), "Concurrent same-channel starts coalesce");
+            const auto active = checker.status();
+            require(active.at("running") && active.at("result").is_null(), "In-flight status does not block or report up to date");
+            rejects([&] { checker.start("1.0.0", "", false); }, "another channel");
+            rejects([&] { checker.check("1.0.0", "", false); }, "already running");
+            rejects([&] { checker.install_release("windows", "1.0.1-beta.2"); }, "Check for updates");
+            release_fetch = true;
+            const auto wait = [&] {
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                while (checker.status().at("running").get<bool>() && std::chrono::steady_clock::now() < deadline)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                require(!checker.status().at("running").get<bool>(), "Background check completes within test deadline");
+            };
+            wait();
+            require(calls == 1 && checker.status().at("result").at("latestVersion") == "1.0.1-beta.2",
+                "Background check publishes beta result from one request");
+            require(checker.install_release("android", "1.0.1-beta.2").at("updateAvailable"),
+                "Successful automatic check supports existing explicit verified-update workflow");
+            checker.start("1.0.0", "", false);
+            wait();
+            require(checker.status().at("result").at("latestVersion") == "1.0.0",
+                "New stable-only check honors channel and clears older beta result");
+            checker.fetch = [](const std::string&, std::size_t) -> std::string { throw std::runtime_error("offline fixture"); };
+            checker.start("1.0.0", "", false);
+            wait();
+            require(checker.status().at("result").is_null() && checker.status().at("error") == "offline fixture",
+                "Background failure is explicit and invalidates previous release");
+            rejects([&] { checker.link("release", "1.0.1-beta.2"); }, "Check for updates");
+        }
         using archive_catalog::canonical_version;
         using archive_catalog::compare_versions;
         const std::string abc_digest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";

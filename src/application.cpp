@@ -1,5 +1,6 @@
 #include "application.hpp"
 #include "transfer.hpp"
+#include "version.hpp"
 
 #include <libxml/parser.h>
 #include <libxml/tree.h>
@@ -147,6 +148,15 @@ Config read_config(const std::filesystem::path& path, bool allow_empty_sources) 
         throw std::runtime_error("debug_window must be true or false");
     }
     config.debug_window = debug == "true";
+    if (xmlHasProp(root, BAD_CAST "include_beta_updates")) {
+        const auto channel = attribute(root, "include_beta_updates");
+        if (channel != "true" && channel != "false")
+            throw std::runtime_error("include_beta_updates must be true or false");
+        config.include_beta_updates = channel == "true";
+    }
+    config.skipped_update_version = attribute(root, "skipped_update_version");
+    if (!config.skipped_update_version.empty() && !canonical_version(config.skipped_update_version))
+        throw std::runtime_error("skipped_update_version must be an ArchiveFetch version");
     if (const auto connections = attribute(root, "download_connections"); !connections.empty()) {
         if (connections.size() != 1 || connections[0] < '1' || connections[0] > '0' + max_download_connections)
             throw std::runtime_error("download_connections must be 1 to " + std::to_string(max_download_connections));

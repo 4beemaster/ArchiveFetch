@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -32,6 +33,8 @@ struct Config {
     std::vector<std::string> excluded_extensions = default_excluded_extensions();
     bool debug_window = false;
     bool debug_logging = false;
+    std::optional<bool> include_beta_updates;
+    std::string skipped_update_version;
     std::vector<Selection> downloads;
 };
 

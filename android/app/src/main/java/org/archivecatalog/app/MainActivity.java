@@ -356,6 +356,8 @@ public final class MainActivity extends Activity {
     @Override protected void onStart() {
         super.onStart(); resumed = true;
         bindCatalog();
+        if (web != null && pageLoaded)
+            web.evaluateJavascript("if (typeof automaticUpdateCheck === 'function') automaticUpdateCheck()", null);
     }
     @Override protected void onStop() {
         resumed = false;

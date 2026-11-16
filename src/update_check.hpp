@@ -4,7 +4,10 @@
 #include "version.hpp"
 #include <nlohmann/json.hpp>
 #include <chrono>
+#include <atomic>
 #include <map>
+#include <mutex>
+#include <thread>
 #include <utility>
 
 namespace archive_catalog {
@@ -14,6 +17,44 @@ public:
     using Json = nlohmann::json;
     using Fetch = std::function<std::string(const std::string&, std::size_t)>;
     Fetch fetch;
+    ~UpdateCheck() {
+        stopping_ = true;
+        if (worker_.joinable()) worker_.join();
+    }
+
+    Json start(const std::string& current, const std::string& ca_bundle, bool include_beta) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (running_) {
+            if (include_beta != include_beta_) throw std::runtime_error("An update check for another channel is still running");
+            return status_locked();
+        }
+        if (worker_.joinable()) worker_.join();
+        begin_locked(include_beta);
+        try {
+            worker_ = std::thread([this, current, ca_bundle, include_beta, fetcher = fetch] {
+                try {
+                    auto result = perform(current, ca_bundle, include_beta, fetcher);
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    checked_ = std::move(result);
+                    running_ = false;
+                } catch (const std::exception& failure) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    error_ = failure.what();
+                    running_ = false;
+                }
+            });
+        } catch (const std::exception& failure) {
+            error_ = failure.what();
+            running_ = false;
+            throw;
+        }
+        return status_locked();
+    }
+
+    Json status() const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        return status_locked();
+    }
 
     static Json select(const Json& releases, const std::string& current, bool include_beta) {
         if (!canonical_version(current)) throw std::runtime_error("The installed ArchiveFetch version is invalid");
@@ -79,23 +120,69 @@ public:
     }
 
     Json check(const std::string& current, const std::string& ca_bundle, bool include_beta) {
+        {
+            std::lock_guard<std::mutex> guard(mutex_);
+            if (running_) throw std::runtime_error("An update check is already running");
+            if (worker_.joinable()) worker_.join();
+            begin_locked(include_beta);
+        }
+        try {
+            auto result = perform(current, ca_bundle, include_beta, fetch);
+            std::lock_guard<std::mutex> guard(mutex_);
+            checked_ = std::move(result);
+            running_ = false;
+            return checked_;
+        } catch (const std::exception& failure) {
+            std::lock_guard<std::mutex> guard(mutex_);
+            error_ = failure.what();
+            running_ = false;
+            throw;
+        }
+    }
+
+    std::string link(const std::string& kind, const std::string& version) const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        return link_locked(kind, version);
+    }
+
+    Json install_release(const std::string& platform, const std::string& version) const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        link_locked(platform, version);
+        link_locked("checksums", version);
+        if (!checked_.at("updateAvailable").get<bool>())
+            throw std::runtime_error("Only a newer checked release can be installed");
+        return checked_;
+    }
+
+private:
+    void begin_locked(bool include_beta) {
         checked_ = nullptr;
+        error_.clear();
+        running_ = true;
+        include_beta_ = include_beta;
+    }
+
+    Json status_locked() const {
+        return {{"ok", true}, {"running", running_}, {"includeBeta", include_beta_},
+            {"result", checked_}, {"error", error_}};
+    }
+
+    Json perform(const std::string& current, const std::string& ca_bundle, bool include_beta, const Fetch& fetcher) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
         TransferHooks hooks;
-        hooks.cancelled = [deadline] { return std::chrono::steady_clock::now() >= deadline; };
+        hooks.cancelled = [this, deadline] { return stopping_ || std::chrono::steady_clock::now() >= deadline; };
         Http http(ca_bundle, hooks);
         Json releases = Json::array();
         try {
             for (int page = 1; page <= 5; ++page) {
                 const auto url = release_page_url(page);
-                const auto body = fetch ? fetch(url, response_limit) : http.get_release_page(page, response_limit);
+                const auto body = fetcher ? fetcher(url, response_limit) : http.get_release_page(page, response_limit);
                 if (body.size() > response_limit) throw std::runtime_error("GitHub's release response is too large");
                 const auto batch = Json::parse(body);
                 if (!batch.is_array() || batch.size() > 20) throw std::runtime_error("GitHub returned an invalid release page");
                 for (const auto& release : batch) releases.push_back(release);
                 if (batch.size() < 20) {
-                    checked_ = select(releases, current, include_beta);
-                    return checked_;
+                    return select(releases, current, include_beta);
                 }
             }
             throw std::runtime_error("Too many releases to check reliably; open the ArchiveFetch releases page instead");
@@ -104,7 +191,7 @@ public:
         }
     }
 
-    std::string link(const std::string& kind, const std::string& version) const {
+    std::string link_locked(const std::string& kind, const std::string& version) const {
         if (checked_.is_null()) throw std::runtime_error("Check for updates before opening a release link");
         if (version != checked_.at("latestVersion").get<std::string>())
             throw std::runtime_error("The checked release changed; check for updates again before opening a link");
@@ -115,18 +202,15 @@ public:
         throw std::runtime_error("That download is not available in the checked release");
     }
 
-    Json install_release(const std::string& platform, const std::string& version) const {
-        link(platform, version);
-        link("checksums", version);
-        if (!checked_.at("updateAvailable").get<bool>())
-            throw std::runtime_error("Only a newer checked release can be installed");
-        return checked_;
-    }
-
-private:
     static constexpr const char* repository = "https://github.com/4beemaster/ArchiveFetch";
     static constexpr std::size_t response_limit = 2 * 1024 * 1024;
     Json checked_;
+    mutable std::mutex mutex_;
+    std::thread worker_;
+    std::atomic<bool> stopping_{false};
+    bool running_ = false;
+    bool include_beta_ = false;
+    std::string error_;
 };
 
 }

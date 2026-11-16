@@ -379,6 +379,23 @@ void web_smoke(httplib::Server& server, WebApplication& application, int port, c
         bool rejected = false;
         try { settings.command(values); } catch (const Json::type_error&) { rejected = true; }
         require(rejected && !settings.config.debug_logging, "Invalid logging values cannot change the current setting");
+        require(settings.command({{"action", "updateChannel"}}).at("includeBeta") ==
+            (std::string(ARCHIVEFETCH_VERSION).find("-beta.") != std::string::npos),
+            "First update channel follows the installed build");
+        settings.command({{"action", "updateChannel"}, {"includeBeta", false}});
+        values["debugLogging"] = false;
+        settings.command(values);
+        WebApplication stable_channel(settings.root);
+        require(stable_channel.command({{"action", "updateChannel"}}).at("includeBeta") == false,
+            "Explicit stable channel survives settings saves and backend restart, independent of browser port");
+        settings.command({{"action", "updateChannel"}, {"includeBeta", true}});
+        WebApplication beta_channel(settings.root);
+        require(beta_channel.command({{"action", "updateChannel"}}).at("includeBeta") == true,
+            "Explicit beta channel survives backend restart");
+        rejected = false;
+        try { settings.command({{"action", "updateChannel"}, {"includeBeta", "yes"}}); }
+        catch (const Json::type_error&) { rejected = true; }
+        require(rejected && settings.config.include_beta_updates.value(), "Invalid channel cannot change saved settings");
     }
     httplib::Client client("127.0.0.1", port);
     client.set_connection_timeout(5, 0); client.set_read_timeout(10, 0);
@@ -431,17 +448,58 @@ void web_smoke(httplib::Server& server, WebApplication& application, int port, c
         application.open_update = [&](const std::string& url) { opened = url; };
         result = client.Post("/api/command", "{\"action\":\"checkUpdates\"}", "application/json");
         require(result && result->status == 403 && checks == 0, "Unauthenticated update checks do not contact GitHub");
+        result = client.Post("/api/command", "{\"action\":\"startUpdateCheck\"}", "application/json");
+        require(result && result->status == 403 && checks == 0, "Automatic checks require authentication too");
+        result = client.Post("/api/command", "{\"action\":\"updateCheckStatus\"}", "application/json");
+        require(result && result->status == 403, "Background release status requires authentication");
+        result = client.Post("/api/command", "{\"action\":\"skipUpdate\",\"version\":\"999.0.0\"}", "application/json");
+        require(result && result->status == 403 && application.config.skipped_update_version.empty(),
+            "Unauthenticated requests cannot skip a release");
+        result = send({{"action", "skipUpdate"}, {"version", "999.0.0"}});
+        require(result && result->status == 400 && application.config.skipped_update_version.empty(),
+            "Skipping requires a checked release");
         result = client.Post("/api/command", "{\"action\":\"installUpdate\",\"version\":\"999.0.0\"}", "application/json");
         require(result && result->status == 403, "Unauthenticated requests cannot install an app update");
         result = send({{"action", "installUpdate"}, {"version", "999.0.0"}, {"path", "arbitrary.exe"}});
         require(result && result->status == 400, "A client path cannot bypass release download and verification");
         result = send({{"action", "openUpdate"}, {"kind", "release"}, {"version", "999.0.0"}});
         require(result && result->status == 400 && opened.empty(), "Opening a release requires a successful check");
+        result = send({{"action", "startUpdateCheck"}, {"includeBeta", true}});
+        require(result && result->status == 200, "Authenticated automatic check starts");
+        for (int attempt = 0; attempt < 100; ++attempt) {
+            result = send({{"action", "updateCheckStatus"}});
+            if (!Json::parse(result->body).at("running").get<bool>()) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        require(result && result->status == 200 && Json::parse(result->body).at("result").at("latestVersion") == "999.0.0" &&
+            Json::parse(result->body).at("result").contains("updatePlatform"),
+            "Automatic check status returns platform-specific checked release without installing");
+        checks = 0;
         result = send({{"action", "checkUpdates"}, {"includeBeta", false}, {"url", "https://example.invalid"}});
         require(result && result->status == 200 && checks == 1, "Authenticated manual update check uses fixed endpoint");
         const auto updates = Json::parse(result->body);
         require(updates.at("currentVersion") == ARCHIVEFETCH_VERSION && updates.at("latestVersion") == "999.0.0" &&
             updates.at("updateAvailable") == true && updates.at("release").at("url") == page, "Update API returns release details");
+        result = send({{"action", "skipUpdate"}, {"version", "999.0.1"}});
+        require(result && result->status == 400 && application.config.skipped_update_version.empty(), "Unseen versions cannot be skipped");
+        result = send({{"action", "skipUpdate"}, {"version", "999.0.0"}});
+        require(result && result->status == 200 && read_config(application.settings, true).skipped_update_version == "999.0.0",
+            "Skipped release is saved to installation settings");
+        result = send({{"action", "updateCheckStatus"}});
+        require(result && Json::parse(result->body).at("result").at("skipped") == true,
+            "Background result marks the skipped release without deleting it");
+        result = send({{"action", "checkUpdates"}, {"includeBeta", false}});
+        require(result && Json::parse(result->body).at("latestVersion") == "999.0.0" &&
+            Json::parse(result->body).at("updateAvailable") == true && Json::parse(result->body).at("skipped") == true,
+            "Manual check still returns skipped available release");
+        {
+            WebApplication restarted(application.root);
+            require(restarted.command({{"action", "updateChannel"}}).at("skippedVersion") == "999.0.0",
+                "Skipped version survives backend restart");
+        }
+        application.config.skipped_update_version = "998.0.0";
+        result = send({{"action", "updateCheckStatus"}});
+        require(result && Json::parse(result->body).at("result").at("skipped") == false, "Skipping an older version does not hide a newer release");
         result = send({{"action", "openUpdate"}, {"kind", "windows"}, {"version", "999.0.0"}, {"url", "https://example.invalid"}});
         require(result && result->status == 200 && opened == download, "Native browser opens only the checked platform download");
         opened.clear();

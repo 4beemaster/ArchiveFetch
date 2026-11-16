@@ -184,6 +184,7 @@ async function renewSession() {
   const session = await localRequest('/session');
   if (session.token !== state.token) { state.libraryKey = ''; state.sourceKey = ''; state.queueKey = ''; state.selected.clear(); }
   state.token = session.token; showVersion(session);
+  updateConnected(false);
 }
 async function command(action, fields = {}) {
   if (state.pending) return null;

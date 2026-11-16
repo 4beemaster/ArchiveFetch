@@ -181,17 +181,132 @@ function releaseButton(label, kind, url, release) {
   });
   return button;
 }
-$('check-updates').addEventListener('click', async () => {
+let updateCheckPromise = null;
+let updateChannelReady = false;
+let updateChannelSaving = false;
+let updateChannelError = '';
+let savedUpdateChannel = false;
+let updateConnectionReady = false;
+let publishedUpdate = null;
+let publishedUpdateAutomatic = false;
+let updateCheckAutomatic = false;
+let publishedUpdateError = '';
+let dismissedRelease = '';
+async function initializeUpdateChannel() {
+  if (updateChannelReady) return true;
+  try {
+    const channel = await localRequest('/api/command', { action: 'updateChannel' });
+    savedUpdateChannel = channel.includeBeta;
+    $('update-beta').checked = savedUpdateChannel;
+    updateChannelReady = true;
+    updateChannelError = '';
+    return true;
+  } catch (error) {
+    updateChannelError = `Cannot load the update channel: ${error.message}`;
+    updateError(updateChannelError);
+    publishedUpdateError = updateChannelError; renderPublishedUpdate();
+    return false;
+  }
+}
+function renderPublishedUpdate() {
+  const version = publishedUpdate?.updateAvailable ? publishedUpdate.latestVersion : '';
+  $('release-banner').hidden = publishedUpdateError ? dismissedRelease === 'error'
+  : !version || version === dismissedRelease || (publishedUpdateAutomatic && publishedUpdate.skipped);
+  $('release-banner-notes').hidden = !version || !!publishedUpdateError;
+  $('release-banner-skip').hidden = !version || !!publishedUpdateError;
+  $('release-banner-text').textContent = publishedUpdateError
+    ? 'Could not check for ArchiveFetch updates. Open Settings for details or retry.'
+    : version ? `ArchiveFetch ${version} is available (installed: ${publishedUpdate.currentVersion}).` : '';
+}
+function showReleaseNotes() {
+  if (!publishedUpdate) return;
+  $('release-notes-title').textContent = `ArchiveFetch ${publishedUpdate.latestVersion} release notes`;
+  $('release-notes-content').textContent = publishedUpdate.release.notes || 'No release notes were provided.';
+  if (!$('release-notes-dialog').open) $('release-notes-dialog').showModal();
+}
+$('release-banner-notes').addEventListener('click', showReleaseNotes);
+$('release-banner-skip').addEventListener('click', async () => {
+  const version = publishedUpdate?.latestVersion;
+  if (!version) return;
+  $('release-banner-skip').disabled = true;
+  try {
+    await localRequest('/api/command', { action: 'skipUpdate', version });
+    if (publishedUpdate?.latestVersion === version) {
+      publishedUpdate.skipped = true;
+      publishedUpdateAutomatic = true;
+      renderPublishedUpdate();
+      $('update-status').textContent = `Automatic notifications skipped for ArchiveFetch ${version}. Manual checks still show this release.`;
+    }
+  } catch (error) {
+    updateError(error.message);
+    fail(`Could not skip ArchiveFetch ${version}: ${error.message}`);
+  } finally { $('release-banner-skip').disabled = false; }
+});
+$('release-banner-action').addEventListener('click', () => $('settings-button').click());
+$('release-banner-dismiss').addEventListener('click', () => {
+  dismissedRelease = publishedUpdateError ? 'error' : publishedUpdate?.latestVersion || '';
+  renderPublishedUpdate();
+});
+$('update-beta').addEventListener('change', async () => {
+  updateChannelSaving = true;
+  $('update-beta').disabled = true;
+  $('check-updates').disabled = true;
+  try {
+    const channel = await localRequest('/api/command', { action: 'updateChannel', includeBeta: $('update-beta').checked });
+    savedUpdateChannel = channel.includeBeta;
+    updateChannelReady = true;
+    updateChannelError = '';
+  } catch (error) {
+    $('update-beta').checked = savedUpdateChannel;
+    updateChannelError = `Cannot save the update channel: ${error.message}`;
+    updateError(updateChannelError);
+    return;
+  } finally {
+    updateChannelSaving = false;
+    $('update-beta').disabled = false;
+    $('check-updates').disabled = !!updateCheckPromise;
+  }
+  publishedUpdate = null;
+  publishedUpdateError = '';
+  $('update-result').hidden = true; $('update-links').replaceChildren();
+  $('update-status').textContent = 'Update channel changed. Check for updates to refresh the result.';
+  renderPublishedUpdate();
+});
+function automaticUpdateCheck() {
+  if (!updateChannelReady || updateChannelSaving || !state.token) return;
+  void checkForUpdates(true);
+}
+function updateConnected(connected) {
+  const reconnected = connected && !updateConnectionReady;
+  updateConnectionReady = connected;
+  if (reconnected) automaticUpdateCheck();
+}
+async function performUpdateCheck() {
   $('check-updates').disabled = true; $('update-beta').disabled = true;
   $('update-result').hidden = true; $('update-links').replaceChildren(); updateError('');
   $('update-status').textContent = 'Checking GitHub releases...';
   try {
-    const result = await localRequest('/api/command', { action: 'checkUpdates', includeBeta: $('update-beta').checked });
+    if (!await initializeUpdateChannel()) throw new Error(updateChannelError);
+    await localRequest('/api/command', { action: 'startUpdateCheck', includeBeta: $('update-beta').checked });
+    let status;
+    do {
+      status = await localRequest('/api/command', { action: 'updateCheckStatus' });
+      if (status.running) await new Promise(resolve => setTimeout(resolve, 500));
+    } while (status.running);
+    if (!status.result) throw new Error(status.error || 'The update check returned no release.');
+    const result = status.result;
+    publishedUpdate = result;
+    publishedUpdateAutomatic = updateCheckAutomatic;
+    publishedUpdateError = '';
+    renderPublishedUpdate();
     const versions = `Installed: ${result.currentVersion}. Latest published: ${result.latestVersion}.`;
     $('update-status').textContent = result.updateAvailable ? `Update available. ${versions}`
       : result.currentNewer ? `Your build is newer than the latest published release. ${versions}` : `You are up to date. ${versions}`;
     $('update-url').value = result.release.url;
     $('update-notes').textContent = result.release.notes || 'No release notes were provided.';
+    const notesButton = node('button', 'Release notes'); notesButton.type = 'button';
+    notesButton.addEventListener('click', showReleaseNotes);
+    $('update-links').append(notesButton);
     $('update-links').append(releaseButton('Open release page', 'release', result.release.url, result));
     if (result.updateAvailable) {
       const platform = result.updatePlatform || result.platform;
@@ -213,9 +328,25 @@ $('check-updates').addEventListener('click', async () => {
     }
     if (result.release.assets.checksums) $('update-links').append(releaseButton('Open checksums', 'checksums', result.release.assets.checksums.url, result));
     $('update-result').hidden = false;
-  } catch (error) { $('update-status').textContent = 'Update check failed.'; updateError(error.message); }
-  finally { $('check-updates').disabled = false; $('update-beta').disabled = false; }
-});
+  } catch (error) {
+    publishedUpdate = null; publishedUpdateError = error.message; renderPublishedUpdate();
+    $('update-status').textContent = 'Update check failed. Use Check for updates to retry.';
+    updateError(error.message);
+    window.ArchiveFetchDiagnostics?.failure('update-check', error);
+  }
+  finally {
+    $('check-updates').disabled = false; $('update-beta').disabled = false;
+    if (updateChannelError) updateError(updateChannelError);
+  }
+}
+function checkForUpdates(automatic = false) {
+  if (!updateCheckPromise) {
+    updateCheckAutomatic = automatic;
+    updateCheckPromise = performUpdateCheck().finally(() => { updateCheckPromise = null; });
+  } else if (!automatic) updateCheckAutomatic = false;
+  return updateCheckPromise;
+}
+$('check-updates').addEventListener('click', () => { void checkForUpdates(); });
 document.querySelectorAll('.close-dialog').forEach(button => button.addEventListener('click', () => button.closest('dialog').close()));
 $('settings-dialog').addEventListener('close', () => { $('access-key').value = ''; $('secret-key').value = ''; loadLibrary(true).catch(error => fail(error.message)); });
 document.querySelectorAll('.browse').forEach(button => button.addEventListener('click', async () => {
@@ -544,10 +675,13 @@ async function reconnectNativeSession() {
     }
     state.token = token;
     await refresh();
+    automaticUpdateCheck();
   } catch (error) { fail(`Cannot connect: ${error.message}`); }
 }
 async function connect() {
   const local = await localRequest('/session'); state.token = local.token; showVersion(local);
+  await initializeUpdateChannel();
+  updateConnected(true);
   hostLogging = local.logging || null;
   if (hostLogging) window.ArchiveFetchDiagnostics?.connect(state.token);
   let session = local;

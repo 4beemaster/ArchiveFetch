@@ -1338,6 +1338,10 @@ public:
         property("excluded_extensions", format_extension_list(next.excluded_extensions));
         property("follow_parts", next.follow_parts ? "true" : "false"); property("debug_window", next.debug_window ? "true" : "false");
         property("debug_logging", next.debug_logging ? "true" : "false");
+        if (next.include_beta_updates)
+            property("include_beta_updates", *next.include_beta_updates ? "true" : "false");
+        if (!next.skipped_update_version.empty())
+            property("skipped_update_version", next.skipped_update_version);
         for (const auto& source : model.snapshot().sources) {
             auto* child = xmlNewChild(node, nullptr, BAD_CAST "source", nullptr);
             xmlNewProp(child, BAD_CAST "url", BAD_CAST source.url.c_str());
@@ -1368,18 +1372,48 @@ public:
 
     Json command(const Json& value) {
         auto action = value.at("action").get<std::string>();
-        if (action == "checkUpdates") {
-            auto result = updates.check(ARCHIVEFETCH_VERSION, config.ca_bundle, value.value("includeBeta", false));
+        if (action == "updateChannel") {
+            const bool include_beta = value.contains("includeBeta") ? value.at("includeBeta").get<bool>()
+                : config.include_beta_updates.value_or(std::string(ARCHIVEFETCH_VERSION).find("-beta.") != std::string::npos);
+            if (!config.include_beta_updates || *config.include_beta_updates != include_beta) {
+                auto next = config;
+                next.include_beta_updates = include_beta;
+                write_settings_file(next);
+                config.include_beta_updates = include_beta;
+            }
+            return {{"ok", true}, {"includeBeta", include_beta}, {"skippedVersion", config.skipped_update_version}};
+        }
+        if (action == "skipUpdate") {
+            const auto version = value.at("version").get<std::string>();
+            updates.link("release", version);
+            const auto checked = updates.status().at("result");
+            if (checked.is_null() || !checked.at("updateAvailable").get<bool>() || checked.at("latestVersion") != version)
+                throw std::runtime_error("Only a newer checked release can be skipped");
+            auto next = config;
+            next.skipped_update_version = version;
+            write_settings_file(next);
+            config.skipped_update_version = version;
+            return {{"ok", true}, {"skippedVersion", version}};
+        }
+        if (action == "startUpdateCheck")
+            return updates.start(ARCHIVEFETCH_VERSION, config.ca_bundle, value.value("includeBeta", false));
+        if (action == "checkUpdates" || action == "updateCheckStatus") {
+            auto result = action == "checkUpdates"
+                ? updates.check(ARCHIVEFETCH_VERSION, config.ca_bundle, value.value("includeBeta", false))
+                : updates.status();
+            auto& release = action == "checkUpdates" ? result : result["result"];
+            if (release.is_null()) return result;
 #if defined(__ANDROID__)
-            result["platform"] = "android";
+            release["platform"] = "android";
 #elif defined(_WIN32)
-            result["platform"] = "windows";
+            release["platform"] = "windows";
 #elif defined(PS5_PAYLOAD)
-            result["platform"] = "ps5";
+            release["platform"] = "ps5";
 #else
-            result["platform"] = "other";
+            release["platform"] = "other";
 #endif
-            result["updatePlatform"] = update_platform;
+            release["updatePlatform"] = update_platform;
+            release["skipped"] = release.at("latestVersion") == config.skipped_update_version;
             return result;
         }
         if (action == "updateStatus") return release_update.status();

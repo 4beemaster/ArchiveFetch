@@ -277,8 +277,10 @@ async function refresh() {
       await request('/api/client/ready', {});
       hostReady = true;
     }
+    updateConnected(true);
   } catch (error) {
     if (error.login || $('login-dialog').open) return;
+    if (!consoleTarget) updateConnected(false);
     $('connection').textContent = 'Disconnected'; $('connection-light').classList.remove('online');
     if (hostLogging) window.ArchiveFetchDiagnostics?.failure('refresh', error);
     if (state.snapshot) { state.snapshot.busy = true; state.snapshot.scanning = true; }

@@ -1,4 +1,5 @@
 #include "application.hpp"
+#include "version.hpp"
 
 #include <libxml/parser.h>
 
@@ -52,6 +53,28 @@ int main() {
         }
         require(config.automatically_start_downloads, "Automatic downloads default to enabled for existing settings");
         require(!config.debug_window, "Debug window defaults to disabled for existing settings");
+        require(!config.include_beta_updates.has_value(), "Existing settings defer the initial update channel to the build");
+        require(config.skipped_update_version.empty(), "Existing settings have no skipped release");
+        for (const auto& value : {"", "1.0.1-beta.3", "1.0.1", "latest", "../1.0.1"}) {
+            {
+                std::ofstream output(path);
+                output << "<archive_catalog skipped_update_version='" << value
+                       << "'><source url='https://archive.org/details/example-part-0'/></archive_catalog>";
+            }
+            if (std::string(value).empty() || canonical_version(value))
+                require(read_config(path).skipped_update_version == value, "Parse exact skipped release");
+            else rejects([&] { read_config(path); });
+        }
+        for (const auto& value : {"false", "true", "invalid", ""}) {
+            {
+                std::ofstream output(path);
+                output << "<archive_catalog include_beta_updates='" << value
+                       << "'><source url='https://archive.org/details/example-part-0'/></archive_catalog>";
+            }
+            if (std::string(value) == "true" || std::string(value) == "false")
+                require(read_config(path).include_beta_updates == (std::string(value) == "true"), "Parse saved update channel");
+            else rejects([&] { read_config(path); });
+        }
         for (const auto& value : {"false", "true", "invalid"}) {
             {
                 std::ofstream output(path);
